@@ -16,7 +16,8 @@ import {
   Plus,
   X,
   RotateCcw,
-  ChevronDown
+  ChevronDown,
+  MessageSquareQuote
 } from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { copyMarkdownToClipboard, downloadMarkdownFile, sendToObsidian } from '../services/exporter';
@@ -299,6 +300,16 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
           )}
           {article.aiTriageReason && (
             <p className="text-[11px] text-slate-400 dark:text-slate-500 italic">理由: {article.aiTriageReason}</p>
+          )}
+
+          {article.aiCommentsInsight && article.aiCommentsInsight !== '暂无关键争议补充' && (
+            <div className="pt-1.5 border-t border-slate-200/60 dark:border-slate-800 flex items-start gap-1.5 text-[11px] text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-950/30 p-1.5 rounded-lg">
+              <MessageSquareQuote className="w-3.5 h-3.5 shrink-0 mt-0.5 text-indigo-500" />
+              <p className="line-clamp-2 leading-relaxed">
+                <span className="font-semibold mr-1">热评争议与补充:</span>
+                {article.aiCommentsInsight}
+              </p>
+            </div>
           )}
         </div>
       ) : (

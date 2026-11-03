@@ -36,6 +36,8 @@ export interface ZhihuArticleItem {
   aiCategory?: string; // AI 推荐归类收藏夹
   aiTriageRating?: 'keep' | 'discard' | 'review'; // 分拣评级: 值得留(keep) / 可清理(discard) / 不确定(review)
   aiTriageReason?: string; // 建议理由
+  aiCommentsInsight?: string; // 评论区高赞焦点与争议洞察
+  hotComments?: string[]; // 抓取到的热评/神评 Top 5
   aiProcessedAt?: number;
 
   // 已移出分拣范围 / 回收站状态

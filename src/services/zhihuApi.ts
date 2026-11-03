@@ -351,3 +351,52 @@ export async function updateCollectionDescription(
     throw new Error(`更新收藏夹简介失败: ${err}`);
   }
 }
+
+/**
+ * 抓取单篇文章/回答的高赞热评 / 神评 (Top 5)
+ */
+export async function fetchHotComments(contentId: string, contentType: string): Promise<string[]> {
+  try {
+    const headers = await getZhihuHeaders();
+    let typeName = 'answers';
+    if (contentType === 'article' || contentType === 'post') {
+      typeName = 'articles';
+    } else if (contentType === 'pin') {
+      typeName = 'pins';
+    }
+
+    // 优先尝试 comment_v5 根评论排序接口，失败则回退到 root_comments
+    const endpoints = [
+      `https://www.zhihu.com/api/v4/comment_v5/${typeName}/${contentId}/root_comment?order_by=score&limit=5`,
+      `https://www.zhihu.com/api/v4/${typeName}/${contentId}/root_comments?limit=5&order=score`,
+    ];
+
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, { headers });
+        if (!res.ok) continue;
+        const json = await res.json();
+        if (Array.isArray(json.data) && json.data.length > 0) {
+          const comments: string[] = [];
+          for (const item of json.data.slice(0, 5)) {
+            const rawContent = item.content || item.text || '';
+            const clean = typeof rawContent === 'string'
+              ? rawContent.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim()
+              : '';
+            const author = item.author?.name || item.author?.member?.name || '知友';
+            const likes = item.vote_count ?? item.like_count ?? 0;
+            if (clean) {
+              comments.push(`${author} (赞同 ${likes}): ${clean.slice(0, 160)}`);
+            }
+          }
+          if (comments.length > 0) return comments;
+        }
+      } catch (err) {
+        // 继续尝试下一个端点
+      }
+    }
+  } catch (e) {
+    console.warn(`抓取评论失败 [${contentId}]:`, e);
+  }
+  return [];
+}

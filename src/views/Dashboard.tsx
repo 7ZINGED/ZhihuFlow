@@ -33,6 +33,7 @@ import { AutoOrganizeModal } from '../components/AutoOrganizeModal';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
+  fetchHotComments,
   moveArticleBetweenCollections, 
   removeArticleFromCollection
 } from '../services/zhihuApi';
@@ -243,14 +244,26 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 单条 AI 分析
+  // 单条 AI 深度分析 (长文本正文 + 互动指标 + 热评Top5)
   const handleAnalyzeSingle = async (article: ZhihuArticleItem) => {
+    // 1. 尝试抓取或复用高赞热评
+    let hotComments = article.hotComments || [];
+    if (!hotComments || hotComments.length === 0) {
+      try {
+        hotComments = await fetchHotComments(article.contentId, article.contentType);
+      } catch (err) {
+        console.warn('获取热评失败:', err);
+      }
+    }
+
+    // 2. 调用大模型深度分析
     const res = await analyzeArticleWithAI(
-      article.title,
-      article.fullContent || article.title,
-      collections
+      article,
+      collections,
+      hotComments
     );
-    // 合并现有标签与 AI 推荐标签
+
+    // 3. 合并现有标签与 AI 推荐标签
     const currentTags = article.tags || [];
     const newTags = Array.from(new Set([...currentTags, ...(res.tags || [])]));
 
@@ -260,6 +273,8 @@ export const Dashboard: React.FC = () => {
       aiCategory: res.recommendedCategory,
       aiTriageRating: res.triageRating,
       aiTriageReason: res.triageReason,
+      aiCommentsInsight: res.commentsInsight,
+      hotComments,
       tags: newTags,
       aiProcessedAt: Date.now(),
     });

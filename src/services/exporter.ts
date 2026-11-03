@@ -58,6 +58,19 @@ ${
     : ''
 }
 
+${
+  article.aiCommentsInsight && article.aiCommentsInsight !== '暂无关键争议补充'
+    ? `> **💬 评论区焦点洞察**: ${article.aiCommentsInsight}`
+    : ''
+}
+
+${
+  article.hotComments && article.hotComments.length > 0
+    ? `### 💬 评论区高赞神评 Top 5
+${article.hotComments.map((c) => `- ${c}`).join('\n')}`
+    : ''
+}
+
 ---
 
 ## 📖 正文内容备份
