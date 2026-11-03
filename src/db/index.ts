@@ -59,6 +59,8 @@ export interface AISettings {
   model: string;    // 例如: deepseek-chat 或 qwen2.5:7b
   apiKey: string;
   promptTemplate?: string;
+  customTriagePrompt?: string;     // 分拣筛选自定义提示词 (值得留/可清理/不确定评级标准)
+  customCategorizePrompt?: string; // 词条分类与标签提取自定义提示词
 }
 
 export class ZhihuDigestDatabase extends Dexie {

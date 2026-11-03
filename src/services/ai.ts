@@ -1,9 +1,24 @@
 import { type AISettings } from '../db';
 
+export const DEFAULT_TRIAGE_PROMPT = `你是一位敏锐的内容初审与个人知识库专家。请对知乎内容进行分拣筛选与质量评估：
+1. 提炼核心主旨（100字内）与 3 个关键实操/要点；
+2. 给出严谨的分拣评级（triageRating）：
+   - keep (值得留): 包含高信息密度、硬核实操经验、系统推导逻辑或长线参考价值；
+   - discard (可清理): 属于时效短讯、灌水发泄、口水之争、营销引流或空洞泛泛而谈；
+   - review (不确定): 内容质量尚可但对个人知识体系价值不明确，建议人工复审；
+3. 给出 25 字以内一针见血的分拣评级理由说明。`;
+
+export const DEFAULT_CATEGORIZE_PROMPT = `你是一位专业的分类归档与词条分类专家。
+你的任务是深入理解内容的知识图谱与核心领域：
+1. 提取 2~4 个规范化、具象化的专业标签词条（例如：技术架构、产品思维、深度学习、生活技巧等，禁止提取无意义泛词）；
+2. 结合给定的备选收藏夹列表，推荐最合适的目标归宿；若无合适归属请返回「其他」。`;
+
 export const DEFAULT_AI_SETTINGS: AISettings = {
   endpoint: 'https://api.deepseek.com/v1',
   model: 'deepseek-chat',
   apiKey: '',
+  customTriagePrompt: DEFAULT_TRIAGE_PROMPT,
+  customCategorizePrompt: DEFAULT_CATEGORIZE_PROMPT,
 };
 
 export async function getAISettings(): Promise<AISettings> {
@@ -87,39 +102,50 @@ export async function analyzeArticleWithAI(
     ? hotComments.map((c, i) => `${i + 1}. ${c}`).join('\n')
     : '（暂无热评或未开启评论区）';
 
+  // 提取用户自定义提示词（或默认提示词）
+  const triageInstruction = settings.customTriagePrompt?.trim() || DEFAULT_TRIAGE_PROMPT;
+  const categorizeInstruction = settings.customCategorizePrompt?.trim() || DEFAULT_CATEGORIZE_PROMPT;
+
   // 构建 Prompt
   let systemPrompt = '';
   let userPrompt = '';
 
-  if (mode === 'quick') {
-    systemPrompt = `你是一位敏捷的内容初审与速读专家。你的任务是对知乎内容进行【快速粗读】（仅通读正文前 3000 字，不读评论），快速提炼核心论点与主要要点，并给出初步分拣评级建议（值得留 / 可清理 / 不确定）。`;
+  const modeInstruction = mode === 'deep'
+    ? '【当前阅读模式】：全文深度精读（通读全文无字数截断限制，并深度结合评论区高赞热评/神评反馈，提炼全景核心论证、实践踩坑点与争议补充）'
+    : '【当前阅读模式】：快速粗读（通读正文前 3000 字，不读评论，快速提炼核心要点与初步分拣印象）';
 
+  systemPrompt = `${modeInstruction}
+
+【分拣初筛与评级准则】：
+${triageInstruction}
+
+【词条分类与标签提取准则】：
+${categorizeInstruction}`;
+
+  if (mode === 'quick') {
     userPrompt = `【待分析的知乎内容详情】
 - 标题/问题：${article.title}
 - 答主/作者：${article.authorName || '知乎用户'}
 - 互动指标：赞同数 ${article.voteupCount || 0} | 评论数 ${article.commentCount || 0}
 - 当前收藏于：${article.collectionTitle || '默认'}
-${isTruncated ? `\n⚠️ 【重要提示】：本文全文共有 ${totalWordCount} 字，当前由于处于【快速粗读】阶段，仅截取了正文前 3000 字。如果前半部分已展现出强干货推导，请在理由中注明建议后续全文深读。\n` : ''}
+${isTruncated ? `\n⚠️ 【字数截断提示】：正文共 ${totalWordCount} 字，粗读仅截取前 3000 字。\n` : ''}
 【正文阅读内容（${isTruncated ? '前 3000 字粗读截选' : `全文共 ${totalWordCount} 字`}）】：
 ${contentToSend}
 
-【用户现有的收藏夹清单】：
+【备选收藏夹清单】：
 ${collectionsDesc || '（暂无其他收藏夹）'}
 
-请以 JSON 格式严格输出你的分析结果，包含且仅包含以下键：
+请严格按照系统设定的分拣筛选与词条分类标准，以 JSON 格式输出分析结果（禁止使用 markdown 代码块包裹）：
 {
   "summary": "100字以内的宏观凝练摘要，直接陈述内容主旨，不要以'本文...'开头",
   "keyTakeaways": ["核心实操/观点要点1", "核心实操/观点要点2", "核心实操/观点要点3"],
   "tags": ["核心主题标签1", "标签2"],
-  "recommendedCategory": "从上述收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
-  "triageRating": "keep" 或 "discard" 或 "review"（keep表示'值得留'；discard表示'可清理'；review表示'不确定'）,
+  "recommendedCategory": "从备选收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
+  "triageRating": "keep" 或 "discard" 或 "review",
   "triageReason": "20字以内的粗读初步分拣评级理由说明"
-}
-请注意：直接返回合法的 JSON 字符串，不要带 markdown 代码块包裹，也不要有任何其他文字。`;
+}`;
   } else {
     // 深度精读模式 (全文不限字数 + 热评 Top 5)
-    systemPrompt = `你是一位严谨的深度内容精读与个人知识库专家。你的任务是对知乎内容进行【全文深度精读】（通读完整长文本全文，无字数截断限制；并深度结合评论区高赞热评/神评反馈），提炼全景核心论证、实践踩坑点，分析评论区的反驳与关键补充，给出高置信度的深度分拣评级（值得留 / 可清理 / 不确定）。`;
-
     userPrompt = `【待分析的知乎内容详情】
 - 标题/问题：${article.title}
 - 答主/作者：${article.authorName || '知乎用户'}
@@ -132,20 +158,19 @@ ${contentToSend}
 【评论区高赞热评 / 神评 Top 5】：
 ${commentsText}
 
-【用户现有的收藏夹清单】：
+【备选收藏夹清单】：
 ${collectionsDesc || '（暂无其他收藏夹）'}
 
-请以 JSON 格式严格输出你的深度精读分析结果，包含且仅包含以下键：
+请严格按照系统设定的深度精读、分拣筛选与词条分类标准，以 JSON 格式输出分析结果（禁止使用 markdown 代码块包裹）：
 {
   "summary": "140字以内的全景深度摘要，直接提炼文章核心论点、推导脉络与方案精髓",
   "keyTakeaways": ["深度实操/核心要点1", "深度实操/核心要点2", "深度实操/核心要点3"],
   "commentsInsight": "45字以内的评论区高赞焦点、关键争议或实践补充（若热评无实质内容则写'暂无关键争议补充'）",
   "tags": ["核心主题标签1", "标签2"],
-  "recommendedCategory": "从上述收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
-  "triageRating": "keep" 或 "discard" 或 "review"（keep表示'值得留'；discard表示'可清理'；review表示'不确定'）,
+  "recommendedCategory": "从备选收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
+  "triageRating": "keep" 或 "discard" 或 "review",
   "triageReason": "结合全文深度干货度、赞同量及热评反馈给出的25字以内深度分拣评级理由"
-}
-请注意：直接返回合法的 JSON 字符串，不要带 markdown 代码块包裹，也不要有任何其他文字。`;
+}`;
   }
 
   const headers: Record<string, string> = {
