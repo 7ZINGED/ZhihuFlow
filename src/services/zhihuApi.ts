@@ -50,10 +50,12 @@ export async function fetchUserCollectionsList(): Promise<ZhihuCollection[]> {
     const data = await res.json();
     if (Array.isArray(data.data)) {
       for (const item of data.data) {
+        // 知乎 API 在不同版本中，条目数可能在 item.item_count, item.items_count, item.itemCount 或 item.total_count
+        const count = item.item_count ?? item.items_count ?? item.itemCount ?? item.total_count ?? item.item_totals ?? 0;
         collections.push({
           id: String(item.id),
           title: item.title,
-          itemCount: item.item_count || 0,
+          itemCount: count,
           description: item.description || '',
           updatedTime: item.updated_time ? item.updated_time * 1000 : Date.now(),
         });

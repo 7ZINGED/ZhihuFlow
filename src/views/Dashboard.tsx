@@ -74,6 +74,10 @@ export const Dashboard: React.FC = () => {
         setSyncProgress(`已抓取 ${count} 条内容...`);
       });
       await db.articles.bulkPut(items);
+      
+      // 同步更新收藏夹本地缓存的实际条目总数
+      const actualCount = await db.articles.where('collectionId').equals(collectionId).count();
+      await db.collections.update(collectionId, { itemCount: actualCount });
     } catch (err: any) {
       alert(`读取收藏夹失败: ${err.message}`);
     } finally {
