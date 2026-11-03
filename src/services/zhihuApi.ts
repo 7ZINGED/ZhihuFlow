@@ -195,32 +195,51 @@ export async function fetchCollectionContents(
 }
 
 function formatRawContent(raw: any, collectionId: string, collectionTitle: string): ZhihuArticleItem {
-  const content = raw.content;
+  // 知乎 API 常见结构：raw.content (问答/专栏/想法), raw.pin (想法), raw.target (部分聚合端点)
+  const content = raw.content || raw.target || raw.pin;
+
+  // 1. 如果完全没有内容实体，说明是被知乎彻底下架/原作者物理删除或封禁的“幽灵条目”
   if (!content) {
+    const rawId = raw.id || raw.created_time || Math.floor(Math.random() * 1000000);
     return {
-      id: `${collectionId}_deleted_${raw.created_time || Math.random()}`,
-      contentId: String(raw.created_time || 'deleted'),
+      id: `${collectionId}_deleted_${rawId}`,
+      contentId: String(rawId),
       contentType: 'deleted',
       collectionId,
       collectionTitle,
-      title: '（该内容已被原作者删除或已失效）',
+      title: '（该内容已被原作者删除、设为私密或已被知乎屏蔽）',
       url: 'https://www.zhihu.com',
       isDeletedOrInvalid: true,
       createdTime: raw.created_time ? raw.created_time * 1000 : Date.now(),
     };
   }
 
+  // 2. 正常内容解析
   const isQuestionAnswer = content.type === 'answer';
-  const title = isQuestionAnswer
-    ? content.question?.title || '知乎问答'
-    : content.title || '知乎专栏/文章';
+  const isPin = content.type === 'pin';
+  const isArticle = content.type === 'article' || content.type === 'post';
+
+  let title = '知乎内容';
+  if (isQuestionAnswer) {
+    title = content.question?.title || '知乎问答';
+  } else if (isArticle) {
+    title = content.title || '知乎专栏/文章';
+  } else if (isPin) {
+    title = '知乎想法: ' + (content.excerpt_title || (typeof content.content === 'string' ? content.content.slice(0, 30) : '想法动态'));
+  } else {
+    title = content.title || content.question?.title || '知乎条目';
+  }
 
   const authorName = content.author?.name || '匿名用户';
   const authorAvatar = content.author?.avatar_url || '';
-  const url = content.url
-    ? content.url.replace(/^http:/, 'https:')
-    : `https://www.zhihu.com/${content.type}/${content.id}`;
+  
+  let url = content.url || '';
+  if (!url) {
+    url = `https://www.zhihu.com/${content.type || 'answer'}/${content.id}`;
+  }
+  url = url.replace(/^http:/, 'https:');
 
+  // 正文清洗与类型安全
   let cleanText = '';
   if (typeof content.content === 'string') {
     cleanText = content.content.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
@@ -229,14 +248,13 @@ function formatRawContent(raw: any, collectionId: string, collectionTitle: strin
   } else if (typeof content.description === 'string') {
     cleanText = content.description.replace(/<[^>]+>/g, '').trim();
   } else if (typeof content.content === 'object' && content.content !== null) {
-    // 兼容部分专栏/问答把 content 作为富文本对象或包含 text 字段
-    cleanText = content.content.text || content.content.body || JSON.stringify(content.content);
+    cleanText = content.content.text || content.content.body || '';
   }
 
   return {
-    id: `${collectionId}_${content.id}`,
-    contentId: String(content.id),
-    contentType: content.type,
+    id: `${collectionId}_${content.id || raw.id}`,
+    contentId: String(content.id || raw.id),
+    contentType: content.type || 'unknown',
     collectionId,
     collectionTitle,
     title,
