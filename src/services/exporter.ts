@@ -12,17 +12,27 @@ export function formatArticleToMarkdown(article: ZhihuArticleItem): string {
     .map((k) => `- ${k}`)
     .join('\n');
 
+  const ratingMap: Record<string, string> = {
+    keep: '值得留',
+    discard: '可清理',
+    review: '不确定',
+  };
+  const ratingText = article.aiTriageRating ? (ratingMap[article.aiTriageRating] || article.aiTriageRating) : '未分拣';
+
+  const customTags = (article.tags || []).map((t) => `  - ${t}`).join('\n');
+
   return `---
 title: "${article.title.replace(/"/g, '\\"')}"
 source: "${article.url}"
 author: "${article.authorName || '知乎用户'}"
 collection: "${article.collectionTitle}"
-rating: "${article.aiTriageRating || '未评级'}"
+rating: "${ratingText}"
 date: "${dateStr}"
 tags:
   - 知乎收藏
   - ${article.collectionTitle}
-  ${article.aiTriageRating ? `- 分拣/${article.aiTriageRating}` : ''}
+  ${article.aiTriageRating ? `- 分拣/${ratingText}` : ''}
+${customTags}
 ---
 
 # ${article.title}
@@ -44,7 +54,7 @@ ${takeaways}`
 
 ${
   article.aiTriageReason
-    ? `> **AI 分拣建议**: 【${article.aiTriageRating === 'keep' ? '建议留存' : article.aiTriageRating === 'discard' ? '建议弃置/取消' : '待粗读审阅'}】${article.aiTriageReason}`
+    ? `> **AI 分拣建议**: 【${ratingText}】${article.aiTriageReason}`
     : ''
 }
 

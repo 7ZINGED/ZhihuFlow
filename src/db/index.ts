@@ -25,15 +25,22 @@ export interface ZhihuArticleItem {
   
   // 抓取到的完整正文
   fullContent?: string;
-  isDeletedOrInvalid?: boolean; // 是否是已删除或失效失效内容
+  isDeletedOrInvalid?: boolean; // 是否是已删除或失效内容
+
+  // 标签体系 (MoonDigest 风格)
+  tags?: string[];
 
   // AI 摘读与观点分析结果 (类似 MoonDigest)
   aiSummary?: string;
   aiKeyTakeaways?: string[]; // 核心要点
   aiCategory?: string; // AI 推荐归类收藏夹
-  aiTriageRating?: 'keep' | 'discard' | 'review'; // 分拣评级: 留存 / 弃置 / 待审
+  aiTriageRating?: 'keep' | 'discard' | 'review'; // 分拣评级: 值得留(keep) / 可清理(discard) / 不确定(review)
   aiTriageReason?: string; // 建议理由
   aiProcessedAt?: number;
+
+  // 已移出分拣范围 / 回收站状态
+  inTrash?: boolean;
+  trashedAt?: number;
 
   // 用户操作状态
   selected?: boolean;
@@ -56,6 +63,10 @@ export class ZhihuDigestDatabase extends Dexie {
     this.version(1).stores({
       collections: 'id, title, updatedTime',
       articles: 'id, contentId, collectionId, contentType, title, aiTriageRating, isDeletedOrInvalid, updatedTime',
+    });
+    this.version(2).stores({
+      collections: 'id, title, updatedTime',
+      articles: 'id, contentId, collectionId, contentType, title, aiTriageRating, inTrash, isDeletedOrInvalid, updatedTime',
     });
   }
 }

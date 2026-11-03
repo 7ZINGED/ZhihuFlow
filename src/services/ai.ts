@@ -21,6 +21,7 @@ export interface AIAnalysisResult {
   recommendedCategory: string;
   triageRating: 'keep' | 'discard' | 'review';
   triageReason: string;
+  tags?: string[];
 }
 
 /**
@@ -68,8 +69,9 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
 {
   "summary": "100字以内的宏观凝练摘要，直接陈述内容本质，不要以'本文...'开头",
   "keyTakeaways": ["核心提炼要点1", "核心提炼要点2", "核心提炼要点3"],
+  "tags": ["核心主题标签1", "标签2"],
   "recommendedCategory": "从上述收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
-  "triageRating": "keep" 或 "discard" 或 "review"（keep表示内容高价值值得长久留存；discard表示时效性弱、水文、戾气重或无收藏必要；review表示待用户二次粗读确认）,
+  "triageRating": "keep" 或 "discard" 或 "review"（keep表示'值得留'，高价值干货；discard表示'可清理'，时效差/水文/废话；review表示'不确定'，待人工确认）,
   "triageReason": "20字以内的分拣评级理由说明"
 }
 请注意：直接返回合法的 JSON 字符串，不要带 markdown 代码块包裹，也不要有任何其他文字。`;
@@ -115,6 +117,7 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
         ? parsed.triageRating
         : 'review',
       triageReason: parsed.triageReason || 'AI已完成评估',
+      tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t: any) => typeof t === 'string' && t.trim()).slice(0, 5) : [],
     };
   } catch (err) {
     console.warn('AI 解析 JSON 失败，回退文本解析', rawText);
@@ -124,6 +127,7 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
       recommendedCategory: '默认',
       triageRating: 'review',
       triageReason: '未能解析出结构化评估',
+      tags: [],
     };
   }
 }
