@@ -23,7 +23,10 @@ import {
   RotateCcw,
   AlertTriangle,
   Download,
-  Upload
+  Upload,
+  Loader2,
+  Pause,
+  Play
 } from 'lucide-react';
 import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
@@ -706,6 +709,112 @@ export const Dashboard: React.FC = () => {
               <span className="font-bold text-amber-700 dark:text-amber-300 text-xs">{reviewCount}</span>
             </div>
           </div>
+
+          {/* 左侧常驻全局 AI 分拣任务面板 (MoonDigest 风格常驻看板，零遮挡) */}
+          {queueState.status !== 'idle' && queueState.tasks.length > 0 && (
+            <div className="p-3 rounded-2xl bg-gradient-to-br from-blue-50/80 to-indigo-50/60 dark:from-blue-950/40 dark:to-indigo-950/30 border border-blue-200/60 dark:border-blue-900/40 space-y-2.5 animate-fade-in shadow-sm">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  {queueState.status === 'running' ? (
+                    <Loader2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 animate-spin shrink-0" />
+                  ) : queueState.status === 'paused' ? (
+                    <Pause className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                  )}
+                  <span className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate">
+                    {queueState.status === 'running' ? 'AI 读取分拣中' : queueState.status === 'paused' ? '队列已暂停' : '分拣完成'}
+                  </span>
+                </div>
+
+                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100/70 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
+                  {queueState.mode === 'deep' ? '深读' : '粗读'}
+                </span>
+              </div>
+
+              {/* 平滑微型进度条 */}
+              <div className="space-y-1">
+                <div className="h-1.5 w-full bg-blue-200/50 dark:bg-slate-800 rounded-full overflow-hidden">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      queueState.status === 'completed'
+                        ? 'bg-emerald-500'
+                        : queueState.status === 'paused'
+                        ? 'bg-amber-500'
+                        : 'bg-blue-600 animate-pulse'
+                    }`}
+                    style={{
+                      width: `${Math.round(
+                        ((queueState.tasks.filter((t) => t.status === 'done' || t.status === 'failed').length) /
+                          queueState.tasks.length) *
+                          100
+                      )}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400">
+                  <span>
+                    已完成 {queueState.tasks.filter((t) => t.status === 'done').length} / {queueState.tasks.length} 篇
+                  </span>
+                  <span>
+                    {Math.round(
+                      ((queueState.tasks.filter((t) => t.status === 'done' || t.status === 'failed').length) /
+                        queueState.tasks.length) *
+                        100
+                    )}%
+                  </span>
+                </div>
+              </div>
+
+              {/* 当前分析标题 */}
+              {queueState.currentTitle && (
+                <p className="text-[10px] text-slate-600 dark:text-slate-400 truncate italic">
+                  正在读: {queueState.currentTitle}
+                </p>
+              )}
+
+              {/* 快捷操作按钮组 */}
+              <div className="flex items-center gap-1.5 pt-0.5">
+                {queueState.status === 'running' && (
+                  <button
+                    onClick={handlePauseQueue}
+                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg bg-amber-500 text-white hover:bg-amber-600 text-[11px] font-semibold shadow-sm transition"
+                  >
+                    <Pause className="w-3 h-3" />
+                    <span>暂停任务</span>
+                  </button>
+                )}
+
+                {queueState.status === 'paused' && (
+                  <>
+                    <button
+                      onClick={handleResumeQueue}
+                      className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-[11px] font-semibold shadow-sm transition"
+                    >
+                      <Play className="w-3 h-3 fill-current" />
+                      <span>继续分析</span>
+                    </button>
+                    <button
+                      onClick={handleClearQueue}
+                      className="p-1 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition"
+                      title="清空队列"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+
+                {queueState.status === 'completed' && (
+                  <button
+                    onClick={handleClearQueue}
+                    className="flex-1 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold"
+                  >
+                    ✓ 全部完成 (点击关闭)
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* AI 智能一键整理主按钮 */}
           <button

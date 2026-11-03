@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   Sparkles, 
   Pause, 
@@ -7,7 +7,9 @@ import {
   CheckCircle2, 
   AlertCircle,
   Loader2,
-  Trash2
+  Trash2,
+  Minimize2,
+  Maximize2
 } from 'lucide-react';
 import { type AIQueueState } from '../services/aiQueue';
 
@@ -24,6 +26,7 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
   onResume,
   onClear,
 }) => {
+  const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const { status, mode, tasks, currentTitle } = queueState;
 
   if (status === 'idle' || tasks.length === 0) {
@@ -38,6 +41,62 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
 
   const isDeep = mode === 'deep';
 
+  // 最小化胶囊状态 (避免遮挡视线，保持极简)
+  if (isMinimized) {
+    return (
+      <div className="fixed bottom-6 right-6 z-40 animate-fade-in">
+        <div className="flex items-center gap-2.5 px-3.5 py-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800 shadow-xl shadow-slate-900/10 dark:shadow-black/40 text-xs">
+          <div className="flex items-center gap-2">
+            {status === 'running' ? (
+              <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />
+            ) : status === 'paused' ? (
+              <Pause className="w-3.5 h-3.5 text-amber-500" />
+            ) : (
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+            )}
+            <span className="font-bold text-slate-800 dark:text-slate-200">
+              {doneCount}/{total} ({percent}%)
+            </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
+              {isDeep ? '精读' : '粗读'}
+            </span>
+          </div>
+
+          <div className="h-3 w-px bg-slate-200 dark:bg-slate-700" />
+
+          {status === 'running' && (
+            <button
+              onClick={onPause}
+              className="p-1 rounded-lg text-amber-600 hover:bg-amber-50 dark:hover:bg-amber-950/40 transition"
+              title="暂停"
+            >
+              <Pause className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {status === 'paused' && (
+            <button
+              onClick={onResume}
+              className="p-1 rounded-lg text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-950/40 transition"
+              title="继续执行"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+            </button>
+          )}
+
+          <button
+            onClick={() => setIsMinimized(false)}
+            className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
+            title="展开详细浮岛"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 展开的完整浮岛状态
   return (
     <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 w-[92%] max-w-2xl animate-fade-in">
       <div className="bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800 rounded-3xl p-4 shadow-2xl shadow-slate-900/10 dark:shadow-black/50 space-y-3 transition-all duration-200">
@@ -114,7 +173,7 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
                   title="放弃剩余任务并清空队列"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>清空队列</span>
+                  <span>清空</span>
                 </button>
               </>
             )}
@@ -128,6 +187,15 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
                 <span>关闭</span>
               </button>
             )}
+
+            {/* 最小化折叠按钮 */}
+            <button
+              onClick={() => setIsMinimized(true)}
+              className="p-1.5 rounded-xl text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+              title="折叠为右下角微缩胶囊"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 

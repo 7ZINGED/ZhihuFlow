@@ -1,5 +1,17 @@
-import React, { useState } from 'react';
-import { Sparkles, X, ArrowRight, Play, CheckCircle, AlertCircle, RotateCcw } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  Sparkles, 
+  X, 
+  ArrowRight, 
+  Play, 
+  Pause,
+  CheckCircle, 
+  AlertCircle, 
+  History,
+  Trash2,
+  CheckCircle2,
+  Loader2
+} from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { analyzeArticleWithAI } from '../services/ai';
 import { moveArticleBetweenCollections } from '../services/zhihuApi';
@@ -11,12 +23,57 @@ interface AutoOrganizeModalProps {
   onComplete: () => void;
 }
 
-interface PlanItem {
+export interface PlanItem {
   article: ZhihuArticleItem;
   fromCollection: string;
   toCollection: ZhihuCollection;
   status: 'pending' | 'success' | 'skipped' | 'error';
   errorMsg?: string;
+}
+
+interface AutoOrganizeDraft {
+  sourceColId: string;
+  sourceColTitle: string;
+  targetColIds: string[];
+  isDryRun: boolean;
+  plans: PlanItem[];
+  totalArticlesCount: number;
+  status: 'paused' | 'running' | 'completed' | 'idle';
+  updatedAt: number;
+}
+
+const DRAFT_STORAGE_KEY = 'zh_auto_organize_draft_v1';
+
+function loadDraftFromStorage(): AutoOrganizeDraft | null {
+  try {
+    const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: AutoOrganizeDraft = JSON.parse(raw);
+    if (parsed && Array.isArray(parsed.plans) && parsed.plans.length > 0) {
+      if (parsed.status === 'running') parsed.status = 'paused';
+      return parsed;
+    }
+    return null;
+  } catch (e) {
+    console.error('Failed to load organize draft:', e);
+    return null;
+  }
+}
+
+function saveDraftToStorage(draft: AutoOrganizeDraft) {
+  try {
+    localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+  } catch (e) {
+    console.error('Failed to save organize draft:', e);
+  }
+}
+
+function clearDraftStorage() {
+  try {
+    localStorage.removeItem(DRAFT_STORAGE_KEY);
+  } catch (e) {
+    console.error('Failed to clear organize draft:', e);
+  }
 }
 
 export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
@@ -27,19 +84,42 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
 }) => {
   const [sourceColId, setSourceColId] = useState<string>(collections[0]?.id || '');
   const [targetColIds, setTargetColIds] = useState<Set<string>>(new Set(collections.map(c => c.id)));
-  const [isDryRun, setIsDryRun] = useState<boolean>(true); // 默认试运行
+  const [isDryRun, setIsDryRun] = useState<boolean>(true); // 默认试运行预演
   const [running, setRunning] = useState<boolean>(false);
   const [planList, setPlanList] = useState<PlanItem[]>([]);
   const [progressText, setProgressText] = useState<string>('');
+  
+  // 草稿状态
+  const [draft, setDraft] = useState<AutoOrganizeDraft | null>(null);
+
+  const isPausedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      const savedDraft = loadDraftFromStorage();
+      if (savedDraft) {
+        setDraft(savedDraft);
+        // 如果当前没有正在分析的方案，预先载入草稿方案便于用户查看
+        if (planList.length === 0) {
+          setPlanList(savedDraft.plans);
+          setSourceColId(savedDraft.sourceColId);
+          setIsDryRun(savedDraft.isDryRun);
+          setTargetColIds(new Set(savedDraft.targetColIds));
+        }
+      }
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const handleStart = async () => {
-    if (!sourceColId) {
+  // 启动或从草稿继续分析
+  const handleStart = async (resumeFromDraft = false) => {
+    const curSourceId = resumeFromDraft && draft ? draft.sourceColId : sourceColId;
+    if (!curSourceId) {
       alert('请选择源收藏夹！');
       return;
     }
-    const sourceCol = collections.find(c => c.id === sourceColId);
+    const sourceCol = collections.find(c => c.id === curSourceId);
     if (!sourceCol) return;
 
     const availableTargets = collections.filter(c => targetColIds.has(c.id));
@@ -49,15 +129,15 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
     }
 
     setRunning(true);
-    setPlanList([]);
-    setProgressText('正在读取待整理文章...');
+    isPausedRef.current = false;
+    setProgressText('正在读取文章清单...');
 
     try {
       const { db } = await import('../db');
-      let sourceArticles = await db.articles.where('collectionId').equals(sourceColId).toArray();
+      let sourceArticles = await db.articles.where('collectionId').equals(curSourceId).toArray();
       if (sourceArticles.length === 0) {
         const { fetchCollectionContents } = await import('../services/zhihuApi');
-        sourceArticles = await fetchCollectionContents(sourceColId, sourceCol.title);
+        sourceArticles = await fetchCollectionContents(curSourceId, sourceCol.title);
         await db.articles.bulkPut(sourceArticles);
       }
 
@@ -67,18 +147,35 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
         return;
       }
 
-      const plans: PlanItem[] = [];
-      let count = 0;
+      // 准备已有方案
+      let currentPlans: PlanItem[] = resumeFromDraft && draft ? [...draft.plans] : [];
+      const analyzedIds = new Set(currentPlans.map(p => p.article.id));
+      
+      // 待分析的文章列表（过滤掉已经分析过的）
+      const remainingArticles = sourceArticles.filter(a => !analyzedIds.has(a.id));
 
-      for (const article of sourceArticles) {
+      if (remainingArticles.length === 0 && currentPlans.length > 0) {
+        setProgressText(`所有 ${sourceArticles.length} 篇内容均已完成分类预演！`);
+        setRunning(false);
+        return;
+      }
+
+      let count = currentPlans.length;
+      const totalCount = sourceArticles.length;
+
+      for (const article of remainingArticles) {
+        if (isPausedRef.current) {
+          break;
+        }
+
         count++;
-        setProgressText(`AI 正在分析文章 (${count}/${sourceArticles.length}): ${article.title.slice(0, 15)}...`);
+        setProgressText(`AI 正在分析文章 (${count}/${totalCount}): ${article.title.slice(0, 15)}...`);
 
         try {
           const aiRes = await analyzeArticleWithAI(
-            article.title,
-            article.fullContent || article.title,
-            availableTargets
+            article,
+            availableTargets,
+            { mode: 'quick' }
           );
 
           // 寻找匹配的目标收藏夹
@@ -87,9 +184,9 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                  aiRes.recommendedCategory.includes(t.title)
           );
 
-          if (!target || target.id === sourceColId) {
+          if (!target || target.id === curSourceId) {
             // 归类为相同收藏夹，或者未建议移动
-            plans.unshift({
+            currentPlans.unshift({
               article,
               fromCollection: sourceCol.title,
               toCollection: target || sourceCol,
@@ -98,7 +195,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           } else {
             // 建议移动
             if (isDryRun) {
-              plans.unshift({
+              currentPlans.unshift({
                 article,
                 fromCollection: sourceCol.title,
                 toCollection: target,
@@ -109,11 +206,11 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               await moveArticleBetweenCollections(
                 article.contentId,
                 article.contentType,
-                sourceColId,
+                curSourceId,
                 target.id
               );
               await db.articles.delete(article.id);
-              plans.unshift({
+              currentPlans.unshift({
                 article,
                 fromCollection: sourceCol.title,
                 toCollection: target,
@@ -121,21 +218,43 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               });
             }
           }
-          setPlanList([...plans]);
         } catch (e: any) {
-          plans.unshift({
+          currentPlans.unshift({
             article,
             fromCollection: sourceCol.title,
             toCollection: sourceCol,
             status: 'error',
             errorMsg: e.message,
           });
-          setPlanList([...plans]);
+        }
+
+        setPlanList([...currentPlans]);
+
+        // 每分析完一篇即时存盘至草稿箱，防刷新与误关
+        const newDraft: AutoOrganizeDraft = {
+          sourceColId: curSourceId,
+          sourceColTitle: sourceCol.title,
+          targetColIds: Array.from(targetColIds),
+          isDryRun,
+          plans: [...currentPlans],
+          totalArticlesCount: totalCount,
+          status: isPausedRef.current ? 'paused' : 'running',
+          updatedAt: Date.now(),
+        };
+        setDraft(newDraft);
+        saveDraftToStorage(newDraft);
+
+        if (isPausedRef.current) {
+          break;
         }
       }
 
-      setProgressText(isDryRun ? '试运行完成！以下是 AI 智能归类方案：' : '整理执行完毕！');
-      onComplete();
+      if (isPausedRef.current) {
+        setProgressText(`⏸️ 已暂停分析！当前已提炼 ${currentPlans.length} 篇方案，随时可继续或直接应用。`);
+      } else {
+        setProgressText(isDryRun ? `🎉 试运行完成！已生成 ${currentPlans.length} 篇分类预演方案：` : '整理执行完毕！');
+        onComplete();
+      }
     } catch (err: any) {
       alert(`处理出错: ${err.message}`);
     } finally {
@@ -143,19 +262,35 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
     }
   };
 
-  // 确认从试运行一键应用到知乎线上
-  const handleApplyAllDryRun = async () => {
+  // 暂停分析
+  const handlePause = () => {
+    isPausedRef.current = true;
+    setProgressText('正在挂起当前单篇请求，即将暂停...');
+  };
+
+  // 放弃草稿
+  const handleClearDraft = () => {
+    if (confirm('确定丢弃当前未完成的重分类预演草稿吗？')) {
+      clearDraftStorage();
+      setDraft(null);
+      setPlanList([]);
+      setProgressText('已丢弃草稿，可重新选择收藏夹开始。');
+    }
+  };
+
+  // 确认一键应用当前已有的预演方案到知乎线上（支持部分应用）
+  const handleApplyPendingPlans = async () => {
     const moveTargets = planList.filter(p => p.status === 'pending');
     if (moveTargets.length === 0) return;
 
-    if (!confirm(`确定将这 ${moveTargets.length} 篇内容按照 AI 建议实际移动到目标收藏夹吗？`)) return;
+    if (!confirm(`确定将当前已提炼出的 ${moveTargets.length} 篇内容，实际移动到目标知乎收藏夹吗？`)) return;
 
     setRunning(true);
     let done = 0;
     const { db } = await import('../db');
 
     for (const item of moveTargets) {
-      setProgressText(`正在执行移动 (${++done}/${moveTargets.length})...`);
+      setProgressText(`正在执行移动 (${++done}/${moveTargets.length}): ${item.article.title.slice(0, 12)}...`);
       try {
         await moveArticleBetweenCollections(
           item.article.contentId,
@@ -172,10 +307,24 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
       setPlanList([...planList]);
     }
 
+    // 更新草稿中的方案状态
+    if (draft) {
+      const updatedDraft = {
+        ...draft,
+        plans: [...planList],
+        updatedAt: Date.now(),
+      };
+      setDraft(updatedDraft);
+      saveDraftToStorage(updatedDraft);
+    }
+
     setRunning(false);
-    setProgressText('全量分类应用完成！');
+    setProgressText(`🎉 已成功将 ${done} 篇内容移动至新收藏夹！`);
     onComplete();
   };
+
+  const pendingCount = planList.filter(p => p.status === 'pending').length;
+  const isPaused = !running && draft && draft.plans.length < draft.totalArticlesCount && draft.plans.length > 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fade-in">
@@ -185,11 +334,46 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-bold text-base">
             <Sparkles className="w-5 h-5 text-blue-600 dark:text-blue-400" />
             <span>AI 自动整理与重分类收藏夹</span>
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50">
+              断点草稿保护
+            </span>
           </div>
-          <button onClick={onClose} className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200">
+          <button 
+            onClick={onClose} 
+            className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
+
+        {/* 草稿恢复提示条 (MoonDigest 风格断点保护) */}
+        {draft && draft.plans.length > 0 && !running && (
+          <div className="p-3 rounded-2xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-800/60 flex items-center justify-between text-xs text-amber-800 dark:text-amber-200 animate-fade-in shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <History className="w-4 h-4 text-amber-600 shrink-0" />
+              <div className="truncate">
+                <span className="font-bold">发现未完成重分类草稿：</span>
+                <span>源收藏夹「{draft.sourceColTitle}」，已预演 {draft.plans.length} / {draft.totalArticlesCount} 篇</span>
+              </div>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0 ml-2">
+              <button
+                onClick={() => handleStart(true)}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold shadow-sm transition"
+              >
+                <Play className="w-3 h-3 fill-current" />
+                <span>继续分析未完成</span>
+              </button>
+              <button
+                onClick={handleClearDraft}
+                className="p-1 rounded-lg bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-700 text-amber-700 dark:text-amber-300 hover:bg-rose-50 hover:text-rose-600 transition"
+                title="清空当前草稿"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* 配置选择区 */}
         <div className="grid grid-cols-2 gap-4 text-xs shrink-0">
@@ -218,7 +402,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                   disabled={running}
                   className="rounded text-blue-600"
                 />
-                <span className="font-medium">试运行 (Dry Run 预演，不直接改知乎)</span>
+                <span className="font-medium">试运行 (Dry Run 预演，不直接修改知乎)</span>
               </label>
             </div>
           </div>
@@ -251,25 +435,44 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
 
         {/* 进度提示与操作条 */}
         <div className="flex items-center justify-between pt-1 shrink-0 text-xs">
-          <span className="text-blue-600 dark:text-blue-400 font-medium animate-pulse">{progressText}</span>
+          <span className="text-blue-600 dark:text-blue-400 font-medium truncate max-w-[50%] animate-pulse">
+            {progressText}
+          </span>
           <div className="flex items-center gap-2">
-            {!running && planList.some(p => p.status === 'pending') && (
+            {/* 暂停按钮 */}
+            {running && (
               <button
-                onClick={handleApplyAllDryRun}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-sm transition"
+                onClick={handlePause}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-medium shadow-sm transition"
               >
-                <CheckCircle className="w-3.5 h-3.5" />
-                应用预演方案到知乎
+                <Pause className="w-3.5 h-3.5" />
+                暂停分析
               </button>
             )}
-            <button
-              onClick={handleStart}
-              disabled={running}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 transition"
-            >
-              <Play className="w-3.5 h-3.5" />
-              {running ? 'AI 正在分类中...' : isDryRun ? '开始试运行' : '直接开始整理'}
-            </button>
+
+            {/* 一键应用当前已提炼出的预演方案 (支持部分方案先行落地) */}
+            {!running && pendingCount > 0 && (
+              <button
+                onClick={handleApplyPendingPlans}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-sm transition"
+                title="即使未全部分析完，也可直接应用目前已有的建议移动项"
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                应用当前方案 ({pendingCount} 篇)
+              </button>
+            )}
+
+            {/* 开始 / 继续分析按钮 */}
+            {!running && (
+              <button
+                onClick={() => handleStart(isPaused)}
+                disabled={running}
+                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 transition"
+              >
+                <Play className="w-3.5 h-3.5 fill-current" />
+                {isPaused ? '继续分析未完成' : isDryRun ? '开始试运行预演' : '直接开始整理'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -278,6 +481,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           {planList.length === 0 ? (
             <div className="h-40 flex flex-col items-center justify-center text-slate-400 space-y-2">
               <p>选择源收藏夹后点击上方开始，AI 将逐篇研读正文并推荐最贴切的目的地</p>
+              <p className="text-[11px] text-slate-400/80">支持随时暂停、刷新/关闭断点保留，可对已分析出的部分方案随时落地生效</p>
             </div>
           ) : (
             planList.map((item, idx) => (
