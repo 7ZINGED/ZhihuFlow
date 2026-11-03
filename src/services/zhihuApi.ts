@@ -328,3 +328,26 @@ export async function removeArticleFromCollection(
     throw new Error(`取消收藏失败: ${err}`);
   }
 }
+
+/**
+ * 调用知乎 API 更新收藏夹描述简介 (同步到知乎线上)
+ */
+export async function updateCollectionDescription(
+  collectionId: string,
+  title: string,
+  description: string
+): Promise<void> {
+  const headers = await getZhihuHeaders();
+  const res = await fetch(`https://www.zhihu.com/api/v4/collections/${collectionId}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({
+      title,
+      description,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`更新收藏夹简介失败: ${err}`);
+  }
+}

@@ -127,3 +127,56 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
     };
   }
 }
+
+/**
+ * 为某个收藏夹的内容生成 50 字精炼简介
+ */
+export async function generateCollectionDescription(
+  articles: { title: string; fullContent?: string }[]
+): Promise<string> {
+  const settings = await getAISettings();
+  if (!settings.endpoint || !settings.model) {
+    throw new Error('未配置 AI 接口或模型名称！');
+  }
+
+  const endpointUrl = normalizeEndpoint(settings.endpoint);
+  const articleText = articles
+    .slice(0, 15)
+    .map((a) => `- 标题: ${a.title}\n  正文摘要: ${(a.fullContent || '').slice(0, 200).replace(/\s+/g, ' ')}...`)
+    .join('\n\n');
+
+  const prompt = `根据以下来自知乎收藏夹的文章标题和正文摘要，为这个收藏夹生成一段话精炼的宏观描述。
+不要列举介绍各篇文章的具体主题，宏观一点。介绍是给自己看的，直接介绍，开头不要诸如"本收藏夹……"，不要诸如"特别适合xxx的人"的话，字数严格控制在50字以内，不要在最后输出字数统计。
+
+文章列表：
+${articleText}
+
+请直接生成描述：`;
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (settings.apiKey) {
+    headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
+  }
+
+  const response = await fetch(endpointUrl, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: settings.model.trim(),
+      messages: [
+        { role: 'system', content: '你是一位专业的知识库管理员和内容分析专家。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.7,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`AI 生成描述请求失败 [${response.status}]`);
+  }
+
+  const json = await response.json();
+  return json.choices?.[0]?.message?.content?.trim() || '';
+}

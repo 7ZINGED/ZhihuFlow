@@ -12,18 +12,31 @@ import {
   Square,
   Archive,
   Moon,
-  Sun
+  Sun,
+  FileText,
+  Undo2,
+  Redo2,
+  Check
 } from 'lucide-react';
 import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
 import { SettingsModal } from '../components/SettingsModal';
+import { DescriptionModal } from '../components/DescriptionModal';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
   moveArticleBetweenCollections, 
-  removeArticleFromCollection 
+  removeArticleFromCollection
 } from '../services/zhihuApi';
-import { analyzeArticleWithAI } from '../services/ai';
+import { analyzeArticleWithAI, generateCollectionDescription } from '../services/ai';
+
+interface HistoryRecord {
+  article: ZhihuArticleItem;
+  fromCollectionId: string;
+  toCollectionId?: string;
+  action: 'move' | 'delete';
+  undone?: boolean;
+}
 
 export const Dashboard: React.FC = () => {
   const [selectedCollectionId, setSelectedCollectionId] = useState<string>('all');
@@ -33,6 +46,17 @@ export const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [syncProgress, setSyncProgress] = useState<string>('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
+  // 描述生成弹窗状态
+  const [descModalData, setDescModalData] = useState<{
+    isOpen: boolean;
+    colId: string;
+    colTitle: string;
+    desc: string;
+  }>({ isOpen: false, colId: '', colTitle: '', desc: '' });
+
+  // 撤销/重做操作历史记录
+  const [historyList, setHistoryList] = useState<HistoryRecord[]>([]);
 
   // 暗黑模式状态管理
   const [isDark, setIsDark] = useState<boolean>(() => {
@@ -91,6 +115,39 @@ export const Dashboard: React.FC = () => {
       await db.collections.update(collectionId, { itemCount: actualCount });
     } catch (err: any) {
       alert(`读取收藏夹失败: ${err.message}`);
+    } finally {
+      setLoading(false);
+      setSyncProgress('');
+    }
+  };
+
+  // 一键为收藏夹生成 AI 简介
+  const handleGenerateDesc = async (col: ZhihuCollection) => {
+    setLoading(true);
+    setSyncProgress(`正在分析「${col.title}」并提炼宏观简介...`);
+    try {
+      // 优先从已缓存的本地文章中取前 15 篇
+      let colArticles = await db.articles.where('collectionId').equals(col.id).toArray();
+      if (colArticles.length === 0) {
+        // 若本地未缓存，则先拉取
+        colArticles = await fetchCollectionContents(col.id, col.title);
+        await db.articles.bulkPut(colArticles);
+      }
+
+      if (colArticles.length === 0) {
+        alert('当前收藏夹为空，无法生成简介');
+        return;
+      }
+
+      const generated = await generateCollectionDescription(colArticles);
+      setDescModalData({
+        isOpen: true,
+        colId: col.id,
+        colTitle: col.title,
+        desc: generated,
+      });
+    } catch (e: any) {
+      alert(`生成简介失败: ${e.message}`);
     } finally {
       setLoading(false);
       setSyncProgress('');
@@ -166,7 +223,7 @@ export const Dashboard: React.FC = () => {
     setSyncProgress('');
   };
 
-  // 批量移动
+  // 批量移动 (记录历史用于撤销)
   const handleBatchMove = async (targetColId: string) => {
     const targetCol = collections.find((c) => c.id === targetColId);
     if (!targetCol) return;
@@ -178,19 +235,54 @@ export const Dashboard: React.FC = () => {
 
     setLoading(true);
     let count = 0;
+    const newRecords: HistoryRecord[] = [];
+
     for (const item of targets) {
       setSyncProgress(`正在移动 (${++count}/${targets.length})...`);
       try {
         await moveArticleBetweenCollections(item.contentId, item.contentType, item.collectionId, targetColId);
         await db.articles.delete(item.id);
+        newRecords.push({
+          article: item,
+          fromCollectionId: item.collectionId,
+          toCollectionId: targetColId,
+          action: 'move',
+        });
       } catch (err) {
         console.error(err);
       }
     }
+    setHistoryList((prev) => [...newRecords, ...prev].slice(0, 50));
     setSelectedIds(new Set());
     setLoading(false);
     setSyncProgress('');
-    alert(`成功移动 ${count} 条内容！`);
+  };
+
+  // 一键撤销最近的移动操作
+  const handleUndoRecent = async () => {
+    const lastActive = historyList.find((h) => !h.undone);
+    if (!lastActive) return;
+
+    setLoading(true);
+    setSyncProgress(`正在撤销: 移回「${lastActive.article.title.slice(0, 15)}...」`);
+    try {
+      if (lastActive.action === 'move' && lastActive.toCollectionId) {
+        await moveArticleBetweenCollections(
+          lastActive.article.contentId,
+          lastActive.article.contentType,
+          lastActive.toCollectionId,
+          lastActive.fromCollectionId
+        );
+        await db.articles.put(lastActive.article);
+        lastActive.undone = true;
+        setHistoryList([...historyList]);
+      }
+    } catch (e: any) {
+      alert(`撤销失败: ${e.message}`);
+    } finally {
+      setLoading(false);
+      setSyncProgress('');
+    }
   };
 
   // 批量取消收藏
@@ -230,6 +322,7 @@ export const Dashboard: React.FC = () => {
   const keepCount = articles.filter((a) => a.aiTriageRating === 'keep').length;
   const discardCount = articles.filter((a) => a.aiTriageRating === 'discard').length;
   const invalidCount = articles.filter((a) => a.isDeletedOrInvalid).length;
+  const canUndo = historyList.some((h) => !h.undone);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors duration-200">
@@ -244,14 +337,13 @@ export const Dashboard: React.FC = () => {
               </div>
               <div>
                 <h1 className="font-bold text-sm tracking-tight text-slate-900 dark:text-slate-100 leading-none">
-                  知乎收藏夹 Pro
+                  知流 · ZhihuFlow
                 </h1>
                 <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">MoonDigest 分拣台</span>
               </div>
             </div>
             
             <div className="flex items-center gap-1">
-              {/* 明暗切换按钮 */}
               <button
                 onClick={() => setIsDark(!isDark)}
                 className="p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition"
@@ -327,8 +419,23 @@ export const Dashboard: React.FC = () => {
                   <span className="truncate flex-1" title={col.title}>
                     {col.title}
                   </span>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[11px] opacity-75">{col.itemCount || 0}</span>
+                  
+                  <div className="flex items-center gap-1 shrink-0">
+                    <span className="text-[11px] opacity-75 mr-1">{col.itemCount || 0}</span>
+                    
+                    {/* 一键 AI 生成描述 */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleGenerateDesc(col);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-amber-500 transition"
+                      title="AI 为本收藏夹生成简介"
+                    >
+                      <FileText className="w-3 h-3" />
+                    </button>
+
+                    {/* 拉取同步 */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -348,9 +455,18 @@ export const Dashboard: React.FC = () => {
 
         {/* 底部功能链接 */}
         <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2 text-xs">
+          {canUndo && (
+            <button
+              onClick={handleUndoRecent}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-200/60 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-300/60 transition font-medium"
+            >
+              <Undo2 className="w-3.5 h-3.5" /> 撤销上一次移动
+            </button>
+          )}
+
           <button
             onClick={handleClearLocalCache}
-            className="w-full text-left px-2 py-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/20 transition"
+            className="w-full text-left px-2 py-1 rounded-lg text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/20 transition"
           >
             清空本地缓存
           </button>
@@ -532,6 +648,16 @@ export const Dashboard: React.FC = () => {
       </div>
 
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <DescriptionModal
+        isOpen={descModalData.isOpen}
+        collectionId={descModalData.colId}
+        collectionTitle={descModalData.colTitle}
+        initialDescription={descModalData.desc}
+        onClose={() => setDescModalData({ ...descModalData, isOpen: false })}
+        onSaved={async (newDesc) => {
+          await db.collections.update(descModalData.colId, { description: newDesc });
+        }}
+      />
     </div>
   );
 };
