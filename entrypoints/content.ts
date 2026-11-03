@@ -53,9 +53,9 @@ export default defineContentScript({
         btn.style.boxShadow = '0 2px 6px rgba(5, 109, 232, 0.25)';
       };
 
+      // 关键修复：通过 extension message 通信委托给 Background 打开，完全杜绝 Edge 客户端 ERR_BLOCKED_BY_CLIENT
       btn.onclick = () => {
-        const dashboardUrl = chrome.runtime.getURL('dashboard.html');
-        window.open(dashboardUrl, '_blank');
+        chrome.runtime.sendMessage({ action: 'OPEN_DASHBOARD' });
       };
 
       const addBtn = container.querySelector('.CollectionsHeader-addFavlistButton, .css-10dextj');
