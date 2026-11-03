@@ -10,7 +10,7 @@ import {
   History,
   Trash2,
   CheckCircle2,
-  Loader2
+  FolderOpen
 } from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { analyzeArticleWithAI } from '../services/ai';
@@ -32,8 +32,8 @@ export interface PlanItem {
 }
 
 interface AutoOrganizeDraft {
-  sourceColId: string;
-  sourceColTitle: string;
+  sourceColIds: string[];
+  sourceColTitles: string[];
   targetColIds: string[];
   isDryRun: boolean;
   plans: PlanItem[];
@@ -48,12 +48,17 @@ function loadDraftFromStorage(): AutoOrganizeDraft | null {
   try {
     const raw = localStorage.getItem(DRAFT_STORAGE_KEY);
     if (!raw) return null;
-    const parsed: AutoOrganizeDraft = JSON.parse(raw);
-    if (parsed && Array.isArray(parsed.plans) && parsed.plans.length > 0) {
-      if (parsed.status === 'running') parsed.status = 'paused';
-      return parsed;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.plans) || parsed.plans.length === 0) {
+      return null;
     }
-    return null;
+    // 兼容历史单一 sourceColId 字段
+    if (parsed.sourceColId && !parsed.sourceColIds) {
+      parsed.sourceColIds = [parsed.sourceColId];
+      parsed.sourceColTitles = [parsed.sourceColTitle || ''];
+    }
+    if (parsed.status === 'running') parsed.status = 'paused';
+    return parsed;
   } catch (e) {
     console.error('Failed to load organize draft:', e);
     return null;
@@ -82,8 +87,14 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
   collections,
   onComplete,
 }) => {
-  const [sourceColId, setSourceColId] = useState<string>(collections[0]?.id || '');
-  const [targetColIds, setTargetColIds] = useState<Set<string>>(new Set(collections.map(c => c.id)));
+  // 待整理的源收藏夹多选集合 (默认全选或选第一个)
+  const [sourceColIds, setSourceColIds] = useState<Set<string>>(
+    () => new Set(collections.map((c) => c.id))
+  );
+  // 允许 AI 分类到的目标收藏夹多选集合
+  const [targetColIds, setTargetColIds] = useState<Set<string>>(
+    () => new Set(collections.map((c) => c.id))
+  );
   const [isDryRun, setIsDryRun] = useState<boolean>(true); // 默认试运行预演
   const [running, setRunning] = useState<boolean>(false);
   const [planList, setPlanList] = useState<PlanItem[]>([]);
@@ -99,12 +110,16 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
       const savedDraft = loadDraftFromStorage();
       if (savedDraft) {
         setDraft(savedDraft);
-        // 如果当前没有正在分析的方案，预先载入草稿方案便于用户查看
+        // 如果当前没有正在分析的方案，载入草稿方案便于用户查看
         if (planList.length === 0) {
           setPlanList(savedDraft.plans);
-          setSourceColId(savedDraft.sourceColId);
+          if (savedDraft.sourceColIds && savedDraft.sourceColIds.length > 0) {
+            setSourceColIds(new Set(savedDraft.sourceColIds));
+          }
           setIsDryRun(savedDraft.isDryRun);
-          setTargetColIds(new Set(savedDraft.targetColIds));
+          if (savedDraft.targetColIds && savedDraft.targetColIds.length > 0) {
+            setTargetColIds(new Set(savedDraft.targetColIds));
+          }
         }
       }
     }
@@ -114,35 +129,53 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
 
   // 启动或从草稿继续分析
   const handleStart = async (resumeFromDraft = false) => {
-    const curSourceId = resumeFromDraft && draft ? draft.sourceColId : sourceColId;
-    if (!curSourceId) {
-      alert('请选择源收藏夹！');
+    const curSourceIds = resumeFromDraft && draft && draft.sourceColIds?.length > 0
+      ? new Set(draft.sourceColIds)
+      : sourceColIds;
+
+    if (curSourceIds.size === 0) {
+      alert('请至少选择一个待整理的源收藏夹！');
       return;
     }
-    const sourceCol = collections.find(c => c.id === curSourceId);
-    if (!sourceCol) return;
 
     const availableTargets = collections.filter(c => targetColIds.has(c.id));
     if (availableTargets.length === 0) {
-      alert('请至少选择一个目标收藏夹！');
+      alert('请至少选择一个允许 AI 分类到的目标收藏夹！');
       return;
     }
 
     setRunning(true);
     isPausedRef.current = false;
-    setProgressText('正在读取文章清单...');
+    setProgressText('正在读取已选收藏夹的文章清单...');
 
     try {
       const { db } = await import('../db');
-      let sourceArticles = await db.articles.where('collectionId').equals(curSourceId).toArray();
-      if (sourceArticles.length === 0) {
-        const { fetchCollectionContents } = await import('../services/zhihuApi');
-        sourceArticles = await fetchCollectionContents(curSourceId, sourceCol.title);
-        await db.articles.bulkPut(sourceArticles);
+      const { fetchCollectionContents } = await import('../services/zhihuApi');
+
+      let allSourceArticles: ZhihuArticleItem[] = [];
+
+      for (const colId of curSourceIds) {
+        const col = collections.find(c => c.id === colId);
+        if (!col) continue;
+
+        let colArticles = await db.articles.where('collectionId').equals(colId).toArray();
+        if (colArticles.length === 0) {
+          setProgressText(`正在拉取「${col.title}」的内容...`);
+          colArticles = await fetchCollectionContents(colId, col.title);
+          await db.articles.bulkPut(colArticles);
+        }
+        allSourceArticles.push(...colArticles);
       }
 
+      // 按 article.id 去重
+      const uniqueMap = new Map<string, ZhihuArticleItem>();
+      for (const a of allSourceArticles) {
+        uniqueMap.set(a.id, a);
+      }
+      const sourceArticles = Array.from(uniqueMap.values());
+
       if (sourceArticles.length === 0) {
-        alert('该收藏夹内没有文章可整理！');
+        alert('所选的收藏夹内暂无文章可整理！');
         setRunning(false);
         return;
       }
@@ -184,12 +217,14 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                  aiRes.recommendedCategory.includes(t.title)
           );
 
-          if (!target || target.id === curSourceId) {
+          const fromColTitle = collections.find(c => c.id === article.collectionId)?.title || article.collectionTitle || '原收藏夹';
+
+          if (!target || target.id === article.collectionId) {
             // 归类为相同收藏夹，或者未建议移动
             currentPlans.unshift({
               article,
-              fromCollection: sourceCol.title,
-              toCollection: target || sourceCol,
+              fromCollection: fromColTitle,
+              toCollection: target || { id: article.collectionId, title: fromColTitle },
               status: 'skipped',
             });
           } else {
@@ -197,7 +232,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
             if (isDryRun) {
               currentPlans.unshift({
                 article,
-                fromCollection: sourceCol.title,
+                fromCollection: fromColTitle,
                 toCollection: target,
                 status: 'pending',
               });
@@ -206,23 +241,24 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               await moveArticleBetweenCollections(
                 article.contentId,
                 article.contentType,
-                curSourceId,
+                article.collectionId,
                 target.id
               );
               await db.articles.delete(article.id);
               currentPlans.unshift({
                 article,
-                fromCollection: sourceCol.title,
+                fromCollection: fromColTitle,
                 toCollection: target,
                 status: 'success',
               });
             }
           }
         } catch (e: any) {
+          const fromColTitle = collections.find(c => c.id === article.collectionId)?.title || article.collectionTitle || '原收藏夹';
           currentPlans.unshift({
             article,
-            fromCollection: sourceCol.title,
-            toCollection: sourceCol,
+            fromCollection: fromColTitle,
+            toCollection: { id: article.collectionId, title: fromColTitle },
             status: 'error',
             errorMsg: e.message,
           });
@@ -231,9 +267,12 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
         setPlanList([...currentPlans]);
 
         // 每分析完一篇即时存盘至草稿箱，防刷新与误关
+        const sourceTitles = Array.from(curSourceIds).map(
+          (id) => collections.find((c) => c.id === id)?.title || id
+        );
         const newDraft: AutoOrganizeDraft = {
-          sourceColId: curSourceId,
-          sourceColTitle: sourceCol.title,
+          sourceColIds: Array.from(curSourceIds),
+          sourceColTitles: sourceTitles,
           targetColIds: Array.from(targetColIds),
           isDryRun,
           plans: [...currentPlans],
@@ -252,7 +291,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
       if (isPausedRef.current) {
         setProgressText(`⏸️ 已暂停分析！当前已提炼 ${currentPlans.length} 篇方案，随时可继续或直接应用。`);
       } else {
-        setProgressText(isDryRun ? `🎉 试运行完成！已生成 ${currentPlans.length} 篇分类预演方案：` : '整理执行完毕！');
+        setProgressText(isDryRun ? `🎉 预演完成！已生成 ${currentPlans.length} 篇重分类方案：` : '整理执行完毕！');
         onComplete();
       }
     } catch (err: any) {
@@ -328,12 +367,12 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fade-in">
-      <div className="glass-panel w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4 border border-slate-200 dark:border-slate-800 max-h-[85vh] flex flex-col">
+      <div className="glass-panel w-full max-w-2xl rounded-3xl p-6 shadow-2xl space-y-4 border border-slate-200 dark:border-slate-800 max-h-[88vh] flex flex-col">
         {/* 标题栏 */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-200/60 dark:border-slate-800 shrink-0">
           <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-bold text-base">
             <Sparkles className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>AI 自动整理与重分类收藏夹</span>
+            <span>AI 自动整理与跨收藏夹重分类</span>
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 border border-emerald-200/50">
               断点草稿保护
             </span>
@@ -353,7 +392,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               <History className="w-4 h-4 text-amber-600 shrink-0" />
               <div className="truncate">
                 <span className="font-bold">发现未完成重分类草稿：</span>
-                <span>源收藏夹「{draft.sourceColTitle}」，已预演 {draft.plans.length} / {draft.totalArticlesCount} 篇</span>
+                <span>包含 {draft.sourceColIds?.length || 1} 个源收藏夹，已预演 {draft.plans.length} / {draft.totalArticlesCount} 篇</span>
               </div>
             </div>
             <div className="flex items-center gap-1.5 shrink-0 ml-2">
@@ -375,62 +414,126 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           </div>
         )}
 
-        {/* 配置选择区 */}
-        <div className="grid grid-cols-2 gap-4 text-xs shrink-0">
-          <div className="space-y-1.5">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">1. 选择待整理的源收藏夹：</label>
-            <select
-              value={sourceColId}
-              onChange={(e) => setSourceColId(e.target.value)}
-              disabled={running}
-              className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 font-medium"
-            >
-              {collections.map(c => (
-                <option key={c.id} value={c.id}>{c.title} ({c.itemCount || 0}篇)</option>
-              ))}
-            </select>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="font-semibold text-slate-700 dark:text-slate-300">2. 执行模式：</label>
-            <div className="flex items-center gap-3 p-2 rounded-xl bg-slate-100 dark:bg-slate-800/60">
-              <label className="flex items-center gap-1.5 cursor-pointer text-slate-700 dark:text-slate-300">
-                <input
-                  type="checkbox"
-                  checked={isDryRun}
-                  onChange={(e) => setIsDryRun(e.target.checked)}
-                  disabled={running}
-                  className="rounded text-blue-600"
-                />
-                <span className="font-medium">试运行 (Dry Run 预演，不直接修改知乎)</span>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        {/* 目标收藏夹多选 */}
+        {/* 1. 待整理的源收藏夹 (多选区域) */}
         <div className="space-y-1.5 text-xs shrink-0">
-          <label className="font-semibold text-slate-700 dark:text-slate-300">3. 允许 AI 分类到的目标收藏夹：</label>
+          <div className="flex items-center justify-between">
+            <label className="font-semibold text-slate-700 dark:text-slate-300">
+              1. 选择待整理的源收藏夹 (可多选，已选 {sourceColIds.size} / {collections.length} 个)：
+            </label>
+            <button
+              type="button"
+              disabled={running}
+              onClick={() => {
+                if (sourceColIds.size === collections.length) {
+                  setSourceColIds(new Set());
+                } else {
+                  setSourceColIds(new Set(collections.map((c) => c.id)));
+                }
+              }}
+              className="text-[11px] text-blue-600 dark:text-blue-400 hover:underline font-medium disabled:opacity-50"
+            >
+              {sourceColIds.size === collections.length ? '全部取消' : '全部选择'}
+            </button>
+          </div>
           <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto p-2 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
-            {collections.map(c => {
-              const checked = targetColIds.has(c.id);
+            {collections.map((c) => {
+              const checked = sourceColIds.has(c.id);
               return (
-                <label key={c.id} className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 cursor-pointer text-slate-700 dark:text-slate-300">
+                <label
+                  key={c.id}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs cursor-pointer transition select-none ${
+                    checked
+                      ? 'bg-blue-50 dark:bg-blue-950/60 border-blue-200 dark:border-blue-800 text-blue-700 dark:text-blue-300 font-medium shadow-sm'
+                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  }`}
+                >
                   <input
                     type="checkbox"
                     checked={checked}
+                    disabled={running}
+                    onChange={(e) => {
+                      const next = new Set(sourceColIds);
+                      e.target.checked ? next.add(c.id) : next.delete(c.id);
+                      setSourceColIds(next);
+                    }}
+                    className="rounded text-blue-600 focus:ring-0"
+                  />
+                  <span>{c.title}</span>
+                  <span className="text-[10px] opacity-70">({c.itemCount || 0}篇)</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* 2. 允许 AI 分类到的目标收藏夹 (多选区域) */}
+        <div className="space-y-1.5 text-xs shrink-0">
+          <div className="flex items-center justify-between">
+            <label className="font-semibold text-slate-700 dark:text-slate-300">
+              2. 允许 AI 分类到的目标收藏夹 (可多选，已选 {targetColIds.size} / {collections.length} 个)：
+            </label>
+            <button
+              type="button"
+              disabled={running}
+              onClick={() => {
+                if (targetColIds.size === collections.length) {
+                  setTargetColIds(new Set());
+                } else {
+                  setTargetColIds(new Set(collections.map((c) => c.id)));
+                }
+              }}
+              className="text-[11px] text-indigo-600 dark:text-indigo-400 hover:underline font-medium disabled:opacity-50"
+            >
+              {targetColIds.size === collections.length ? '全部取消' : '全部选择'}
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-2 max-h-24 overflow-y-auto p-2 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
+            {collections.map((c) => {
+              const checked = targetColIds.has(c.id);
+              return (
+                <label
+                  key={c.id}
+                  className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs cursor-pointer transition select-none ${
+                    checked
+                      ? 'bg-indigo-50 dark:bg-indigo-950/60 border-indigo-200 dark:border-indigo-800 text-indigo-700 dark:text-indigo-300 font-medium shadow-sm'
+                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    disabled={running}
                     onChange={(e) => {
                       const next = new Set(targetColIds);
                       e.target.checked ? next.add(c.id) : next.delete(c.id);
                       setTargetColIds(next);
                     }}
-                    className="rounded text-blue-600"
+                    className="rounded text-indigo-600 focus:ring-0"
                   />
                   <span>{c.title}</span>
                 </label>
               );
             })}
           </div>
+        </div>
+
+        {/* 3. 执行模式选择 */}
+        <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200/80 dark:border-slate-800 text-xs shrink-0">
+          <label className="flex items-center gap-2 cursor-pointer text-slate-700 dark:text-slate-300">
+            <input
+              type="checkbox"
+              checked={isDryRun}
+              onChange={(e) => setIsDryRun(e.target.checked)}
+              disabled={running}
+              className="rounded text-blue-600 w-4 h-4"
+            />
+            <div>
+              <span className="font-semibold">试运行模式 (Dry Run 预演)</span>
+              <span className="text-[11px] text-slate-400 dark:text-slate-500 block">
+                先生成重分类建议方案供您检查，满意后再点击「一键应用到知乎」，不直接更改知乎线上
+              </span>
+            </div>
+          </label>
         </div>
 
         {/* 进度提示与操作条 */}
@@ -466,7 +569,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
             {!running && (
               <button
                 onClick={() => handleStart(isPaused)}
-                disabled={running}
+                disabled={running || sourceColIds.size === 0 || targetColIds.size === 0}
                 className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 transition"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
@@ -480,23 +583,24 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
         <div className="flex-1 overflow-y-auto space-y-2 pr-1 border-t border-slate-200/60 dark:border-slate-800 pt-3 text-xs">
           {planList.length === 0 ? (
             <div className="h-40 flex flex-col items-center justify-center text-slate-400 space-y-2">
-              <p>选择源收藏夹后点击上方开始，AI 将逐篇研读正文并推荐最贴切的目的地</p>
-              <p className="text-[11px] text-slate-400/80">支持随时暂停、刷新/关闭断点保留，可对已分析出的部分方案随时落地生效</p>
+              <FolderOpen className="w-8 h-8 text-slate-300 dark:text-slate-700" />
+              <p>勾选需要整理的多个源收藏夹并点击上方开始，AI 将逐篇研读正文并推荐最贴切的目的地</p>
+              <p className="text-[11px] text-slate-400/80">支持多源多目标交叉归类、随时暂停、刷新断点保留，可对已提炼出的部分方案随时落地生效</p>
             </div>
           ) : (
             planList.map((item, idx) => (
               <div
                 key={idx}
-                className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 flex items-center justify-between gap-3"
+                className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 flex items-center justify-between gap-3 shadow-xs"
               >
                 <div className="flex-1 truncate">
                   <h4 className="font-semibold text-slate-900 dark:text-slate-100 truncate" title={item.article.title}>
                     {item.article.title}
                   </h4>
                   <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800">{item.fromCollection}</span>
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-medium">{item.fromCollection}</span>
                     <ArrowRight className="w-3 h-3 text-slate-400" />
-                    <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-medium">
+                    <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-semibold">
                       {item.toCollection.title}
                     </span>
                   </div>
