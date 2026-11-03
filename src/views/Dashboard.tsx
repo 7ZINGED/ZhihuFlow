@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { 
   Sparkles, 
@@ -21,7 +21,9 @@ import {
   HelpCircle,
   Tag,
   RotateCcw,
-  AlertTriangle
+  AlertTriangle,
+  Download,
+  Upload
 } from 'lucide-react';
 import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
@@ -35,6 +37,7 @@ import {
   removeArticleFromCollection
 } from '../services/zhihuApi';
 import { analyzeArticleWithAI, generateCollectionDescription } from '../services/ai';
+import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
 interface HistoryRecord {
   article: ZhihuArticleItem;
@@ -69,6 +72,35 @@ export const Dashboard: React.FC = () => {
 
   // 浮动 Toast 提示 (带撤销按钮)
   const [toastMsg, setToastMsg] = useState<{ text: string; articleId?: string } | null>(null);
+
+  const sidebarFileInputRef = useRef<HTMLInputElement>(null);
+
+  // 备份与还原处理
+  const handleExportBackup = async () => {
+    try {
+      const res = await exportAllDataToJson();
+      showToast(`备份导出成功！已打包 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+    } catch (e: any) {
+      alert(`导出备份失败: ${e.message}`);
+    }
+  };
+
+  const handleSidebarFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setLoading(true);
+    try {
+      const res = await importDataFromJsonFile(file);
+      showToast(`🎉 备份还原成功！已恢复 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+      await handleSyncCollections();
+    } catch (err: any) {
+      alert(`导入备份失败: ${err.message}`);
+    } finally {
+      setLoading(false);
+      if (sidebarFileInputRef.current) sidebarFileInputRef.current.value = '';
+    }
+  };
 
   // 暗黑模式状态管理
   const [isDark, setIsDark] = useState<boolean>(() => {
@@ -619,9 +651,37 @@ export const Dashboard: React.FC = () => {
             </button>
           )}
 
+          {/* 数据备份与恢复快捷操作 */}
+          <div className="grid grid-cols-2 gap-1.5 pt-1">
+            <button
+              onClick={handleExportBackup}
+              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition text-[11px] font-medium"
+              title="导出当前全部数据为 JSON 文件进行安全冷备份"
+            >
+              <Download className="w-3 h-3 text-blue-500" />
+              <span>数据导出</span>
+            </button>
+
+            <button
+              onClick={() => sidebarFileInputRef.current?.click()}
+              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition text-[11px] font-medium"
+              title="从 JSON 备份文件还原全量数据"
+            >
+              <Upload className="w-3 h-3 text-emerald-500" />
+              <span>数据导入</span>
+            </button>
+            <input
+              ref={sidebarFileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleSidebarFileChange}
+              className="hidden"
+            />
+          </div>
+
           <button
             onClick={handleClearLocalCache}
-            className="w-full text-left px-2 py-1 rounded-lg text-slate-400 dark:text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition"
+            className="w-full text-center px-2 py-1 rounded-lg text-slate-400 dark:text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition text-[11px]"
           >
             清空本地缓存
           </button>

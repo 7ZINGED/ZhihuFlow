@@ -1,14 +1,16 @@
-import React, { useState, useEffect } from 'react';
-import { Settings, X, Save, Key, Globe, Cpu } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Settings, X, Save, Key, Globe, Cpu, Download, Upload, Database, CheckCircle2, AlertCircle } from 'lucide-react';
 import { type AISettings } from '../db';
 import { getAISettings, saveAISettings } from '../services/ai';
+import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
+  onDataImported?: () => void;
 }
 
-export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
+export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onDataImported }) => {
   const [settings, setSettings] = useState<AISettings>({
     endpoint: 'https://api.deepseek.com/v1',
     model: 'deepseek-chat',
@@ -16,10 +18,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
   });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
+  const [backupMsg, setBackupMsg] = useState('');
+  const [backupLoading, setBackupLoading] = useState(false);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
       getAISettings().then(setSettings);
+      setMsg('');
+      setBackupMsg('');
     }
   }, [isOpen]);
 
@@ -36,6 +44,35 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
       }, 800);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleExportBackup = async () => {
+    setBackupLoading(true);
+    try {
+      const res = await exportAllDataToJson();
+      setBackupMsg(`备份成功！已导出 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+    } catch (e: any) {
+      setBackupMsg(`导出失败: ${e.message}`);
+    } finally {
+      setBackupLoading(false);
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setBackupLoading(true);
+    try {
+      const res = await importDataFromJsonFile(file);
+      setBackupMsg(`🎉 导入成功！已还原 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+      onDataImported?.();
+    } catch (err: any) {
+      setBackupMsg(`导入失败: ${err.message}`);
+    } finally {
+      setBackupLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
 
@@ -69,11 +106,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fade-in">
-      <div className="glass-panel w-full max-w-md rounded-3xl p-6 shadow-2xl space-y-5 border border-slate-200 dark:border-slate-800">
+      <div className="glass-panel w-full max-w-lg rounded-3xl p-6 shadow-2xl space-y-5 border border-slate-200 dark:border-slate-800 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between pb-3 border-b border-slate-200/60 dark:border-slate-800">
           <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-bold text-base">
             <Settings className="w-5 h-5 text-blue-600 dark:text-blue-400" />
-            <span>AI 大模型与接口配置</span>
+            <span>设置与本地数据管理</span>
           </div>
           <button
             onClick={onClose}
@@ -114,7 +151,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
           </div>
         </div>
 
-        {/* 表单 */}
+        {/* AI 配置表单 */}
         <div className="space-y-3.5 text-xs">
           <div>
             <label className="flex items-center gap-1 font-medium text-slate-700 dark:text-slate-300 mb-1">
@@ -164,7 +201,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose })
 
         {msg && <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium text-center">{msg}</p>}
 
-        <div className="flex justify-end gap-2 pt-2">
+        {/* 数据备份与恢复区域 (MoonDigest 风格) */}
+        <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-3">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-800 dark:text-slate-100">
+            <Database className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+            <span>本地优先数据备份与恢复 (Local-First Backup)</span>
+          </div>
+          <p className="text-[11px] text-slate-400 dark:text-slate-500 leading-relaxed">
+            所有收藏夹内容、AI去水摘要、要点、标签、分拣评级及回收站状态均存储在浏览器本地 IndexedDB 中。你可以随时将全量数据导出为 JSON 文件进行安全冷备份，或跨浏览器导入恢复。
+          </p>
+
+          <div className="flex items-center gap-2.5">
+            <button
+              onClick={handleExportBackup}
+              disabled={backupLoading}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium transition"
+            >
+              <Download className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>导出全量备份 (.json)</span>
+            </button>
+
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={backupLoading}
+              className="flex-1 flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium transition"
+            >
+              <Upload className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+              <span>导入备份数据 (.json)</span>
+            </button>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+          </div>
+
+          {backupMsg && (
+            <p className="text-xs text-center font-medium text-blue-600 dark:text-blue-400 animate-fade-in">
+              {backupMsg}
+            </p>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 pt-2 border-t border-slate-200/60 dark:border-slate-800">
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-xl text-xs text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 font-medium"
