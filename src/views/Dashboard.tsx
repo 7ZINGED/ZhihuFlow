@@ -7,15 +7,12 @@ import {
   FolderInput, 
   Settings, 
   Search, 
-  SlidersHorizontal,
   FolderOpen,
   CheckSquare,
   Square,
-  FileDown,
-  ExternalLink,
-  ShieldAlert,
   Archive,
-  BarChart2
+  Moon,
+  Sun
 } from 'lucide-react';
 import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
@@ -27,7 +24,6 @@ import {
   removeArticleFromCollection 
 } from '../services/zhihuApi';
 import { analyzeArticleWithAI } from '../services/ai';
-import { downloadMarkdownFile } from '../services/exporter';
 
 export const Dashboard: React.FC = () => {
   const [selectedCollectionId, setSelectedCollectionId] = useState<string>('all');
@@ -38,11 +34,27 @@ export const Dashboard: React.FC = () => {
   const [syncProgress, setSyncProgress] = useState<string>('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
+  // 暗黑模式状态管理
+  const [isDark, setIsDark] = useState<boolean>(() => {
+    const saved = localStorage.getItem('zh_dark_mode');
+    if (saved !== null) return saved === 'true';
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+
+  useEffect(() => {
+    if (isDark) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('zh_dark_mode', String(isDark));
+  }, [isDark]);
+
   // 从本地 Dexie 响应式读取数据
   const collections = useLiveQuery(() => db.collections.toArray(), []) || [];
   const articles = useLiveQuery(() => db.articles.toArray(), []) || [];
 
-  // 1. 初始化拉取收藏夹列表
+  // 初始化拉取收藏夹列表
   useEffect(() => {
     handleSyncCollections();
   }, []);
@@ -75,7 +87,6 @@ export const Dashboard: React.FC = () => {
       });
       await db.articles.bulkPut(items);
       
-      // 同步更新收藏夹本地缓存的实际条目总数
       const actualCount = await db.articles.where('collectionId').equals(collectionId).count();
       await db.collections.update(collectionId, { itemCount: actualCount });
     } catch (err: any) {
@@ -182,7 +193,7 @@ export const Dashboard: React.FC = () => {
     alert(`成功移动 ${count} 条内容！`);
   };
 
-  // 批量取消收藏 (支持一键清理失效内容)
+  // 批量取消收藏
   const handleBatchRemove = async () => {
     const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
     if (targets.length === 0) return;
@@ -208,7 +219,6 @@ export const Dashboard: React.FC = () => {
     alert(`已成功移除 ${count} 条收藏！`);
   };
 
-  // 清除本地缓存
   const handleClearLocalCache = async () => {
     if (confirm('确定清空本地缓存的知乎文章和 AI 分析结果吗？（不影响知乎线上的收藏夹）')) {
       await db.articles.clear();
@@ -216,62 +226,73 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 统计数据
   const totalCount = articles.length;
   const keepCount = articles.filter((a) => a.aiTriageRating === 'keep').length;
   const discardCount = articles.filter((a) => a.aiTriageRating === 'discard').length;
   const invalidCount = articles.filter((a) => a.isDeletedOrInvalid).length;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 text-slate-800">
+    <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors duration-200">
       {/* 左侧收藏夹与分拣导航 */}
-      <div className="glass-panel w-72 shrink-0 flex flex-col justify-between border-r border-slate-200/80 p-4">
+      <div className="glass-panel w-72 shrink-0 flex flex-col justify-between border-r border-slate-200/80 dark:border-slate-800 p-4">
         <div className="space-y-4">
-          {/* Logo 区域 */}
-          <div className="flex items-center justify-between pb-3 border-b border-slate-200/60">
+          {/* Logo 区域与工具 */}
+          <div className="flex items-center justify-between pb-3 border-b border-slate-200/60 dark:border-slate-800">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
                 <Sparkles className="w-4 h-4" />
               </div>
               <div>
-                <h1 className="font-bold text-sm tracking-tight text-slate-900 leading-none">
+                <h1 className="font-bold text-sm tracking-tight text-slate-900 dark:text-slate-100 leading-none">
                   知乎收藏夹 Pro
                 </h1>
-                <span className="text-[10px] text-slate-400 font-medium">MoonDigest 分拣台</span>
+                <span className="text-[10px] text-slate-400 dark:text-slate-500 font-medium">MoonDigest 分拣台</span>
               </div>
             </div>
-            <button
-              onClick={() => setIsSettingsOpen(true)}
-              className="p-1.5 rounded-xl hover:bg-slate-200/60 text-slate-500 hover:text-slate-800 transition"
-              title="大模型接口设置"
-            >
-              <Settings className="w-4 h-4" />
-            </button>
+            
+            <div className="flex items-center gap-1">
+              {/* 明暗切换按钮 */}
+              <button
+                onClick={() => setIsDark(!isDark)}
+                className="p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition"
+                title={isDark ? '切换亮色模式' : '切换暗黑模式'}
+              >
+                {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
+              </button>
+
+              <button
+                onClick={() => setIsSettingsOpen(true)}
+                className="p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition"
+                title="大模型接口设置"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           {/* 状态统计迷你卡片 */}
-          <div className="grid grid-cols-3 gap-1.5 p-2 rounded-2xl bg-white/70 border border-slate-100 text-center text-xs">
-            <div className="p-1.5 rounded-xl bg-slate-50">
-              <span className="block text-[11px] text-slate-400">总收藏</span>
-              <span className="font-bold text-slate-800 text-sm">{totalCount}</span>
+          <div className="grid grid-cols-3 gap-1.5 p-2 rounded-2xl bg-white/70 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 text-center text-xs">
+            <div className="p-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/60">
+              <span className="block text-[11px] text-slate-400 dark:text-slate-500">总收藏</span>
+              <span className="font-bold text-slate-800 dark:text-slate-200 text-sm">{totalCount}</span>
             </div>
-            <div className="p-1.5 rounded-xl bg-emerald-50">
-              <span className="block text-[11px] text-emerald-600">留存</span>
-              <span className="font-bold text-emerald-700 text-sm">{keepCount}</span>
+            <div className="p-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40">
+              <span className="block text-[11px] text-emerald-600 dark:text-emerald-400">留存</span>
+              <span className="font-bold text-emerald-700 dark:text-emerald-300 text-sm">{keepCount}</span>
             </div>
-            <div className="p-1.5 rounded-xl bg-amber-50">
-              <span className="block text-[11px] text-amber-600">建议弃置</span>
-              <span className="font-bold text-amber-700 text-sm">{discardCount}</span>
+            <div className="p-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40">
+              <span className="block text-[11px] text-amber-600 dark:text-amber-400">建议弃置</span>
+              <span className="font-bold text-amber-700 dark:text-amber-300 text-sm">{discardCount}</span>
             </div>
           </div>
 
           {/* 收藏夹列表 */}
           <div className="space-y-1">
-            <div className="flex items-center justify-between px-2 text-xs font-semibold text-slate-400 uppercase tracking-wider">
+            <div className="flex items-center justify-between px-2 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
               <span>知乎收藏夹</span>
               <button
                 onClick={handleSyncCollections}
-                className="hover:text-blue-600 transition"
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition"
                 title="重新刷新收藏夹列表"
               >
                 <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
@@ -284,7 +305,7 @@ export const Dashboard: React.FC = () => {
                 className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition ${
                   selectedCollectionId === 'all'
                     ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
-                    : 'text-slate-600 hover:bg-slate-100'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                 }`}
               >
                 <span className="flex items-center gap-2 truncate">
@@ -299,7 +320,7 @@ export const Dashboard: React.FC = () => {
                   className={`group flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
                     selectedCollectionId === col.id
                       ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
-                      : 'text-slate-600 hover:bg-slate-100'
+                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                   }`}
                   onClick={() => setSelectedCollectionId(col.id)}
                 >
@@ -313,7 +334,7 @@ export const Dashboard: React.FC = () => {
                         e.stopPropagation();
                         handleFetchArticles(col.id);
                       }}
-                      className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-black/10 transition"
+                      className="p-1 rounded bg-slate-100 hover:bg-blue-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 transition"
                       title="从知乎拉取最新内容"
                     >
                       <RefreshCw className="w-3 h-3" />
@@ -326,14 +347,14 @@ export const Dashboard: React.FC = () => {
         </div>
 
         {/* 底部功能链接 */}
-        <div className="pt-3 border-t border-slate-200/60 space-y-2 text-xs">
+        <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2 text-xs">
           <button
             onClick={handleClearLocalCache}
-            className="w-full text-left px-2 py-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition"
+            className="w-full text-left px-2 py-1.5 rounded-lg text-slate-400 dark:text-slate-500 hover:text-red-600 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/20 transition"
           >
             清空本地缓存
           </button>
-          <div className="px-2 text-[11px] text-slate-400">
+          <div className="px-2 text-[11px] text-slate-400 dark:text-slate-500">
             MoonDigest 风格 · 离线优先架构
           </div>
         </div>
@@ -342,25 +363,26 @@ export const Dashboard: React.FC = () => {
       {/* 右侧主视窗：分拣台与卡片流 */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
         {/* 顶部搜索与筛选栏 */}
-        <div className="glass-panel shrink-0 border-b border-slate-200/80 px-6 py-3.5 flex items-center justify-between gap-4">
-          {/* 搜索框 */}
+        <div className="glass-panel shrink-0 border-b border-slate-200/80 dark:border-slate-800 px-6 py-3.5 flex items-center justify-between gap-4">
           <div className="relative flex-1 max-w-md">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
+            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400 dark:text-slate-500" />
             <input
               type="text"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="搜索标题、作者、AI核心观点..."
-              className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white/80 text-xs text-slate-800"
+              className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white/80 dark:bg-slate-900/80 text-xs text-slate-800 dark:text-slate-100"
             />
           </div>
 
           {/* 状态筛选药丸标签 */}
-          <div className="flex items-center gap-1.5 bg-slate-100/80 p-1 rounded-xl text-xs">
+          <div className="flex items-center gap-1.5 bg-slate-100/80 dark:bg-slate-900/80 p-1 rounded-xl text-xs">
             <button
               onClick={() => setFilterRating('all')}
               className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'all' ? 'bg-white shadow-sm text-slate-900' : 'text-slate-500 hover:text-slate-800'
+                filterRating === 'all'
+                  ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-slate-100'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
               }`}
             >
               全部 ({articles.length})
@@ -368,7 +390,7 @@ export const Dashboard: React.FC = () => {
             <button
               onClick={() => setFilterRating('keep')}
               className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'keep' ? 'bg-emerald-500 text-white shadow-sm' : 'text-slate-500 hover:text-emerald-700'
+                filterRating === 'keep' ? 'bg-emerald-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-emerald-600'
               }`}
             >
               留存 ({keepCount})
@@ -376,7 +398,7 @@ export const Dashboard: React.FC = () => {
             <button
               onClick={() => setFilterRating('discard')}
               className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'discard' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 hover:text-amber-700'
+                filterRating === 'discard' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-amber-600'
               }`}
             >
               建议弃置 ({discardCount})
@@ -384,7 +406,7 @@ export const Dashboard: React.FC = () => {
             <button
               onClick={() => setFilterRating('invalid')}
               className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'invalid' ? 'bg-red-500 text-white shadow-sm' : 'text-slate-500 hover:text-red-700'
+                filterRating === 'invalid' ? 'bg-red-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-red-600'
               }`}
             >
               已失效 ({invalidCount})
@@ -393,23 +415,23 @@ export const Dashboard: React.FC = () => {
         </div>
 
         {/* 批量操作控制浮条 */}
-        <div className="px-6 py-2.5 bg-slate-100/40 border-b border-slate-200/50 flex items-center justify-between text-xs">
+        <div className="px-6 py-2.5 bg-slate-100/40 dark:bg-slate-900/40 border-b border-slate-200/50 dark:border-slate-800 flex items-center justify-between text-xs">
           <div className="flex items-center gap-3">
             <button
               onClick={handleToggleSelectAll}
-              className="flex items-center gap-1.5 font-medium text-slate-600 hover:text-slate-900"
+              className="flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100"
             >
               {selectedIds.size === filteredArticles.length && filteredArticles.length > 0 ? (
-                <CheckSquare className="w-4 h-4 text-blue-600" />
+                <CheckSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />
               ) : (
-                <Square className="w-4 h-4 text-slate-400" />
+                <Square className="w-4 h-4 text-slate-400 dark:text-slate-600" />
               )}
               <span>
                 已选 {selectedIds.size} / {filteredArticles.length} 项
               </span>
             </button>
             {syncProgress && (
-              <span className="text-blue-600 animate-pulse font-medium">
+              <span className="text-blue-600 dark:text-blue-400 animate-pulse font-medium">
                 {syncProgress}
               </span>
             )}
@@ -420,13 +442,12 @@ export const Dashboard: React.FC = () => {
               <button
                 onClick={handleBatchAI}
                 disabled={loading}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium transition"
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 font-medium transition"
               >
                 <Sparkles className="w-3.5 h-3.5" />
                 AI 批量摘读评级
               </button>
 
-              {/* 批量转移 */}
               <select
                 onChange={(e) => {
                   if (e.target.value) {
@@ -435,7 +456,7 @@ export const Dashboard: React.FC = () => {
                   }
                 }}
                 defaultValue=""
-                className="px-2.5 py-1.5 rounded-xl bg-white border border-slate-200 text-slate-700 text-xs font-medium focus:outline-none"
+                className="px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium focus:outline-none"
               >
                 <option value="" disabled>
                   移动到收藏夹...
@@ -447,11 +468,10 @@ export const Dashboard: React.FC = () => {
                 ))}
               </select>
 
-              {/* 批量取消收藏 */}
               <button
                 onClick={handleBatchRemove}
                 disabled={loading}
-                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-50 text-red-600 hover:bg-red-100 font-medium transition"
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-50 dark:bg-red-950/60 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/60 font-medium transition"
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 批量取消/清理
@@ -463,11 +483,11 @@ export const Dashboard: React.FC = () => {
         {/* 卡片流展示区 */}
         <div className="flex-1 overflow-y-auto p-6">
           {filteredArticles.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-3">
-              <div className="w-16 h-16 rounded-3xl bg-slate-100 flex items-center justify-center text-slate-300">
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-600 space-y-3">
+              <div className="w-16 h-16 rounded-3xl bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-300 dark:text-slate-700">
                 <FolderOpen className="w-8 h-8" />
               </div>
-              <p className="text-sm">暂无内容，请在左侧选择收藏夹并点击同步按钮拉取</p>
+              <p className="text-sm">暂无内容，请在左侧收藏夹点击刷新拉取</p>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -511,7 +531,6 @@ export const Dashboard: React.FC = () => {
         </div>
       </div>
 
-      {/* AI 配置弹窗 */}
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
     </div>
   );

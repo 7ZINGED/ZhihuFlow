@@ -2,26 +2,42 @@
 
 @layer base {
   body {
-    @apply bg-slate-50 text-slate-800 antialiased font-sans select-none;
+    @apply antialiased font-sans select-none transition-colors duration-200;
     margin: 0;
     padding: 0;
   }
 }
 
-/* 磨砂玻璃质感 */
+/* 亮色磨砂玻璃质感 */
 .glass-panel {
-  background: rgba(255, 255, 255, 0.82);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(226, 232, 240, 0.8);
+  border-color: rgba(226, 232, 240, 0.8);
 }
 
 .glass-card {
-  background: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  border: 1px solid rgba(241, 245, 249, 1);
+  border-color: rgba(241, 245, 249, 1);
   box-shadow: 0 4px 18px -4px rgba(0, 0, 0, 0.05);
+}
+
+/* 暗黑模式磨砂玻璃质感 */
+.dark .glass-panel {
+  background: rgba(15, 23, 42, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-color: rgba(51, 65, 85, 0.7);
+}
+
+.dark .glass-card {
+  background: rgba(30, 41, 59, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border-color: rgba(51, 65, 85, 0.6);
+  box-shadow: 0 4px 20px -4px rgba(0, 0, 0, 0.35);
 }
 
 /* 自定义纤细滚动条 */
@@ -36,6 +52,12 @@
   background: rgba(203, 213, 225, 0.6);
   border-radius: 9999px;
 }
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.7);
+}
 ::-webkit-scrollbar-thumb:hover {
   background: rgba(148, 163, 184, 0.8);
+}
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
 }
