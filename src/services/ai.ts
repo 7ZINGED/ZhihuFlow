@@ -15,6 +15,11 @@ export async function saveAISettings(settings: AISettings): Promise<void> {
   await chrome.storage.local.set({ ai_settings: settings });
 }
 
+export interface AnalyzeOptions {
+  mode?: 'quick' | 'deep'; // 'quick': 粗读 (正文3000字截断，不读评论) | 'deep': 深读 (全文无限制+热评Top5)
+  hotComments?: string[];
+}
+
 export interface AIAnalysisResult {
   summary: string;
   keyTakeaways: string[];
@@ -23,6 +28,9 @@ export interface AIAnalysisResult {
   triageReason: string;
   tags?: string[];
   commentsInsight?: string;
+  isTruncated: boolean;
+  totalWordCount: number;
+  readingMode: 'quick' | 'deep';
 }
 
 /**
@@ -37,8 +45,9 @@ export function normalizeEndpoint(url: string): string {
 }
 
 /**
- * 调用通用 OpenAI 兼容接口，为单篇文章生成 MoonDigest 风格的摘读、要点及分拣建议
- * 融合 4500 字长正文 + 赞同/评论互动指标 + 热评/神评 Top 5 洞察
+ * 调用通用 OpenAI 兼容接口，为单篇文章生成 MoonDigest 风格的双层摘读体系
+ * 1. 粗读 (quick): 限制正文前 3000 字，仅读正文不读评论；若全文超 3000 字标记截断警示
+ * 2. 深读 (deep): 全文不限字数长文本 + 抓取评论区高赞热评 Top 5 深度归纳
  */
 export async function analyzeArticleWithAI(
   article: {
@@ -50,7 +59,7 @@ export async function analyzeArticleWithAI(
     collectionTitle?: string;
   },
   targetCollections: { id: string; title: string; description?: string }[],
-  hotComments: string[] = []
+  options: AnalyzeOptions = {}
 ): Promise<AIAnalysisResult> {
   const settings = await getAISettings();
   if (!settings.endpoint || !settings.model) {
@@ -58,38 +67,67 @@ export async function analyzeArticleWithAI(
   }
 
   const endpointUrl = normalizeEndpoint(settings.endpoint);
+  const mode = options.mode || 'quick';
 
   const collectionsDesc = targetCollections
     .map((c) => `- 「${c.title}」: ${c.description || '无具体说明'}`)
     .join('\n');
 
-  // 放开正文篇幅到 4500 字（覆盖绝大多数知乎高赞长文）
-  const contentText = (article.fullContent || article.title).trim();
-  const truncatedContent = contentText.slice(0, 4500);
+  // 计算全文总字数与截断判断
+  const fullText = (article.fullContent || article.title).trim();
+  const totalWordCount = fullText.length;
+  const isTruncated = mode === 'quick' && totalWordCount > 3000;
 
-  // 整理热评 Top 5
-  const commentsText = hotComments && hotComments.length > 0
+  // 粗读限制前 3000 字；深读不限字数通读全文
+  const contentToSend = mode === 'quick' ? fullText.slice(0, 3000) : fullText;
+
+  // 粗读模式只读正文（不附带评论）；深读模式才包含评论区 Top 5
+  const hotComments = mode === 'deep' ? (options.hotComments || []) : [];
+  const commentsText = hotComments.length > 0
     ? hotComments.map((c, i) => `${i + 1}. ${c}`).join('\n')
     : '（暂无热评或未开启评论区）';
 
-  // 构建结构化输出 Prompt
-  const systemPrompt = `你是一位严谨的个人知识库管理员与内容精读专家。你的任务是通读用户从知乎收藏的内容（深度阅读长文本正文、结合互动量与评论区高赞热评），提炼其核心高价值干货与评论区洞察，并给出科学的分拣处理建议（值得留 / 可清理 / 不确定）。
+  // 构建 Prompt
+  let systemPrompt = '';
+  let userPrompt = '';
 
-【分拣与评估准则】：
-1. 综合考量正文深度、干货密度与互动指标：
-   - 赞同数高、答主专业且论证详实的专业回答/深度长文应优先评为「值得留 (keep)」；
-   - 时效性弱的八卦资讯、情绪宣泄、广告引流或空洞水文应评为「可清理 (discard)」；
-   - 结论争议较大、需读者结合自身情况二次复核的内容评为「不确定 (review)」。
-2. 结合评论区高赞反馈：若热评中有关键补充、指出了文章漏洞或提供了反向验证案例，务必在「commentsInsight」中精准提炼出来。`;
+  if (mode === 'quick') {
+    systemPrompt = `你是一位敏捷的内容初审与速读专家。你的任务是对知乎内容进行【快速粗读】（仅通读正文前 3000 字，不读评论），快速提炼核心论点与主要要点，并给出初步分拣评级建议（值得留 / 可清理 / 不确定）。`;
 
-  const userPrompt = `【待分析的知乎内容详情】
+    userPrompt = `【待分析的知乎内容详情】
+- 标题/问题：${article.title}
+- 答主/作者：${article.authorName || '知乎用户'}
+- 互动指标：赞同数 ${article.voteupCount || 0} | 评论数 ${article.commentCount || 0}
+- 当前收藏于：${article.collectionTitle || '默认'}
+${isTruncated ? `\n⚠️ 【重要提示】：本文全文共有 ${totalWordCount} 字，当前由于处于【快速粗读】阶段，仅截取了正文前 3000 字。如果前半部分已展现出强干货推导，请在理由中注明建议后续全文深读。\n` : ''}
+【正文阅读内容（${isTruncated ? '前 3000 字粗读截选' : `全文共 ${totalWordCount} 字`}）】：
+${contentToSend}
+
+【用户现有的收藏夹清单】：
+${collectionsDesc || '（暂无其他收藏夹）'}
+
+请以 JSON 格式严格输出你的分析结果，包含且仅包含以下键：
+{
+  "summary": "100字以内的宏观凝练摘要，直接陈述内容主旨，不要以'本文...'开头",
+  "keyTakeaways": ["核心实操/观点要点1", "核心实操/观点要点2", "核心实操/观点要点3"],
+  "tags": ["核心主题标签1", "标签2"],
+  "recommendedCategory": "从上述收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
+  "triageRating": "keep" 或 "discard" 或 "review"（keep表示'值得留'；discard表示'可清理'；review表示'不确定'）,
+  "triageReason": "20字以内的粗读初步分拣评级理由说明"
+}
+请注意：直接返回合法的 JSON 字符串，不要带 markdown 代码块包裹，也不要有任何其他文字。`;
+  } else {
+    // 深度精读模式 (全文不限字数 + 热评 Top 5)
+    systemPrompt = `你是一位严谨的深度内容精读与个人知识库专家。你的任务是对知乎内容进行【全文深度精读】（通读完整长文本全文，无字数截断限制；并深度结合评论区高赞热评/神评反馈），提炼全景核心论证、实践踩坑点，分析评论区的反驳与关键补充，给出高置信度的深度分拣评级（值得留 / 可清理 / 不确定）。`;
+
+    userPrompt = `【待分析的知乎内容详情】
 - 标题/问题：${article.title}
 - 答主/作者：${article.authorName || '知乎用户'}
 - 互动指标：赞同数 ${article.voteupCount || 0} | 评论数 ${article.commentCount || 0}
 - 当前收藏于：${article.collectionTitle || '默认'}
 
-【正文长文本内容（前 4500 字）】：
-${truncatedContent}
+【完整正文全文（全文无限制阅读，共 ${totalWordCount} 字）】：
+${contentToSend}
 
 【评论区高赞热评 / 神评 Top 5】：
 ${commentsText}
@@ -97,17 +135,18 @@ ${commentsText}
 【用户现有的收藏夹清单】：
 ${collectionsDesc || '（暂无其他收藏夹）'}
 
-请以 JSON 格式严格输出你的分析结果，包含且仅包含以下键：
+请以 JSON 格式严格输出你的深度精读分析结果，包含且仅包含以下键：
 {
-  "summary": "120字以内的宏观凝练摘要，直接陈述内容本质与作者核心观点，不要以'本文...'开头",
-  "keyTakeaways": ["核心实操/观点要点1", "核心实操/观点要点2", "核心实操/观点要点3"],
-  "commentsInsight": "40字以内的评论区高赞焦点、关键争议或实践补充（若热评无实质内容则写'暂无关键争议补充'）",
+  "summary": "140字以内的全景深度摘要，直接提炼文章核心论点、推导脉络与方案精髓",
+  "keyTakeaways": ["深度实操/核心要点1", "深度实操/核心要点2", "深度实操/核心要点3"],
+  "commentsInsight": "45字以内的评论区高赞焦点、关键争议或实践补充（若热评无实质内容则写'暂无关键争议补充'）",
   "tags": ["核心主题标签1", "标签2"],
   "recommendedCategory": "从上述收藏夹列表中挑选最合适的目标收藏夹完整标题（若均不合适填'其他'）",
   "triageRating": "keep" 或 "discard" 或 "review"（keep表示'值得留'；discard表示'可清理'；review表示'不确定'）,
-  "triageReason": "结合正文干货度、赞同量及评论反馈给出的25字以内分拣评级理由说明"
+  "triageReason": "结合全文深度干货度、赞同量及热评反馈给出的25字以内深度分拣评级理由"
 }
 请注意：直接返回合法的 JSON 字符串，不要带 markdown 代码块包裹，也不要有任何其他文字。`;
+  }
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -151,7 +190,10 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
         : 'review',
       triageReason: parsed.triageReason || 'AI已完成评估',
       tags: Array.isArray(parsed.tags) ? parsed.tags.filter((t: any) => typeof t === 'string' && t.trim()).slice(0, 5) : [],
-      commentsInsight: parsed.commentsInsight || '暂无关键争议补充',
+      commentsInsight: mode === 'deep' ? (parsed.commentsInsight || '暂无关键争议补充') : undefined,
+      isTruncated,
+      totalWordCount,
+      readingMode: mode,
     };
   } catch (err) {
     console.warn('AI 解析 JSON 失败，回退文本解析', rawText);
@@ -163,6 +205,9 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
       triageReason: '未能解析出结构化评估',
       tags: [],
       commentsInsight: '',
+      isTruncated,
+      totalWordCount,
+      readingMode: mode,
     };
   }
 }

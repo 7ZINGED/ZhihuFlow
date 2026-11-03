@@ -40,6 +40,11 @@ export interface ZhihuArticleItem {
   hotComments?: string[]; // 抓取到的热评/神评 Top 5
   aiProcessedAt?: number;
 
+  // 粗读与深读模式状态 (MoonDigest 风格)
+  aiReadingMode?: 'quick' | 'deep'; // 'quick' 粗读 (正文3000字截断) | 'deep' 深读 (全文无限制+热评Top5)
+  isTruncated?: boolean; // 粗读时是否因超过3000字截断未读完全文
+  totalWordCount?: number; // 全文字数统计
+
   // 已移出分拣范围 / 回收站状态
   inTrash?: boolean;
   trashedAt?: number;

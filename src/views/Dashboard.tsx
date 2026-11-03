@@ -244,26 +244,28 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 单条 AI 深度分析 (长文本正文 + 互动指标 + 热评Top5)
-  const handleAnalyzeSingle = async (article: ZhihuArticleItem) => {
-    // 1. 尝试抓取或复用高赞热评
-    let hotComments = article.hotComments || [];
-    if (!hotComments || hotComments.length === 0) {
-      try {
-        hotComments = await fetchHotComments(article.contentId, article.contentType);
-      } catch (err) {
-        console.warn('获取热评失败:', err);
+  // 单条 AI 分析：支持快速粗读 (quick, 3000字截断，不读评论) 或 深度精读 (deep, 全文不限字数 + 热评Top5)
+  const handleAnalyzeSingle = async (article: ZhihuArticleItem, mode: 'quick' | 'deep' = 'quick') => {
+    let hotComments: string[] | undefined = undefined;
+    if (mode === 'deep') {
+      hotComments = article.hotComments || [];
+      if (!hotComments || hotComments.length === 0) {
+        try {
+          hotComments = await fetchHotComments(article.contentId, article.contentType);
+        } catch (err) {
+          console.warn('获取热评失败:', err);
+        }
       }
     }
 
-    // 2. 调用大模型深度分析
+    // 调用大模型深度/粗读分析
     const res = await analyzeArticleWithAI(
       article,
       collections,
-      hotComments
+      { mode, hotComments }
     );
 
-    // 3. 合并现有标签与 AI 推荐标签
+    // 合并现有标签与 AI 推荐标签
     const currentTags = article.tags || [];
     const newTags = Array.from(new Set([...currentTags, ...(res.tags || [])]));
 
@@ -274,14 +276,17 @@ export const Dashboard: React.FC = () => {
       aiTriageRating: res.triageRating,
       aiTriageReason: res.triageReason,
       aiCommentsInsight: res.commentsInsight,
-      hotComments,
+      hotComments: res.hotComments || article.hotComments,
+      aiReadingMode: res.readingMode,
+      isTruncated: res.isTruncated,
+      totalWordCount: res.totalWordCount,
       tags: newTags,
       aiProcessedAt: Date.now(),
     });
   };
 
-  // 批量 AI 快速分拣
-  const handleBatchAI = async () => {
+  // 批量 AI 分拣 (支持粗读与精读)
+  const handleBatchAI = async (mode: 'quick' | 'deep' = 'quick') => {
     const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
     if (targets.length === 0) {
       alert('请先勾选需要 AI 摘读分拣的文章！');
@@ -290,10 +295,11 @@ export const Dashboard: React.FC = () => {
 
     setLoading(true);
     let done = 0;
+    const modeLabel = mode === 'deep' ? '深度精读' : '快速粗读';
     for (const item of targets) {
-      setSyncProgress(`正在 AI 分析 (${++done}/${targets.length}): ${item.title.slice(0, 15)}...`);
+      setSyncProgress(`正在进行 AI ${modeLabel} (${++done}/${targets.length}): ${item.title.slice(0, 15)}...`);
       try {
-        await handleAnalyzeSingle(item);
+        await handleAnalyzeSingle(item, mode);
       } catch (e) {
         console.warn('单条 AI 分析失败:', e);
       }
@@ -845,12 +851,23 @@ export const Dashboard: React.FC = () => {
               {!isTrashView ? (
                 <>
                   <button
-                    onClick={handleBatchAI}
+                    onClick={() => handleBatchAI('quick')}
                     disabled={loading}
                     className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 font-medium transition"
+                    title="正文限前3000字，不读评论，快速粗读"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    AI 批量摘读评级
+                    AI 批量粗读
+                  </button>
+
+                  <button
+                    onClick={() => handleBatchAI('deep')}
+                    disabled={loading}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 font-medium transition"
+                    title="正文全文不限字数，抓取知乎高赞热评Top 5深入精读"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                    AI 批量深读
                   </button>
 
                   <select
@@ -936,7 +953,8 @@ export const Dashboard: React.FC = () => {
                     sel ? next.add(article.id) : next.delete(article.id);
                     setSelectedIds(next);
                   }}
-                  onTriageAI={() => handleAnalyzeSingle(article)}
+                  onQuickRead={() => handleAnalyzeSingle(article, 'quick')}
+                  onDeepRead={() => handleAnalyzeSingle(article, 'deep')}
                   onMove={async (targetColId) => {
                     await moveArticleBetweenCollections(
                       article.contentId,

@@ -17,7 +17,8 @@ import {
   X,
   RotateCcw,
   ChevronDown,
-  MessageSquareQuote
+  MessageSquareQuote,
+  BookOpen
 } from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { copyMarkdownToClipboard, downloadMarkdownFile, sendToObsidian } from '../services/exporter';
@@ -28,7 +29,8 @@ interface ArticleCardProps {
   isSelected: boolean;
   isTrashView?: boolean;
   onSelect: (selected: boolean) => void;
-  onTriageAI: () => Promise<void>;
+  onQuickRead: () => Promise<void>; // 快速粗读 (正文3000字，不读评论)
+  onDeepRead: () => Promise<void>;  // 深度精读 (全文不限字数 + 热评Top5)
   onMove: (targetCollectionId: string) => Promise<void>;
   onRemove: () => Promise<void>; // 移出分拣范围 (入回收站)
   onRestore?: () => Promise<void>; // 从回收站恢复
@@ -44,7 +46,8 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   isSelected,
   isTrashView = false,
   onSelect,
-  onTriageAI,
+  onQuickRead,
+  onDeepRead,
   onMove,
   onRemove,
   onRestore,
@@ -53,10 +56,11 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   onUpdateTags,
   onTagClick,
 }) => {
-  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzingMode, setAnalyzingMode] = useState<'quick' | 'deep' | null>(null);
   const [copied, setCopied] = useState(false);
   const [showMoveSelect, setShowMoveSelect] = useState(false);
   const [showRatingMenu, setShowRatingMenu] = useState(false);
+  const [showAIMenu, setShowAIMenu] = useState(false);
 
   // 打标签状态
   const [isAddingTag, setIsAddingTag] = useState(false);
@@ -68,12 +72,23 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const handleAI = async () => {
-    setAnalyzing(true);
+  const handleQuickRead = async () => {
+    setAnalyzingMode('quick');
+    setShowAIMenu(false);
     try {
-      await onTriageAI();
+      await onQuickRead();
     } finally {
-      setAnalyzing(false);
+      setAnalyzingMode(null);
+    }
+  };
+
+  const handleDeepRead = async () => {
+    setAnalyzingMode('deep');
+    setShowAIMenu(false);
+    try {
+      await onDeepRead();
+    } finally {
+      setAnalyzingMode(null);
     }
   };
 
@@ -99,6 +114,8 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   };
 
   const isInvalid = article.isDeletedOrInvalid;
+  const isTruncated = article.isTruncated && article.aiReadingMode !== 'deep';
+  const totalLength = article.totalWordCount || (article.fullContent?.length || 0);
 
   return (
     <div
@@ -287,7 +304,26 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
       {/* AI 摘读展示区 */}
       {article.aiSummary ? (
         <div className="mt-2.5 p-2.5 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 text-xs text-slate-700 dark:text-slate-300 space-y-2">
+          {/* 阅读模式徽标 */}
+          <div className="flex items-center justify-between pb-1 border-b border-slate-200/50 dark:border-slate-800">
+            <div className="flex items-center gap-1.5">
+              {article.aiReadingMode === 'deep' ? (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-semibold">
+                  ✨ 深度精读已完成 (全文+热评Top5)
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-medium">
+                  ⚡ 快速粗读 (正文前3000字)
+                </span>
+              )}
+            </div>
+            <span className="text-[10px] text-slate-400">
+              共 {totalLength} 字
+            </span>
+          </div>
+
           <p className="line-clamp-3 leading-relaxed text-slate-600 dark:text-slate-300">{article.aiSummary}</p>
+          
           {article.aiKeyTakeaways && article.aiKeyTakeaways.length > 0 && (
             <div className="space-y-1 pt-1 border-t border-slate-200/60 dark:border-slate-800">
               {article.aiKeyTakeaways.slice(0, 3).map((point, idx) => (
@@ -298,15 +334,17 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
               ))}
             </div>
           )}
+
           {article.aiTriageReason && (
             <p className="text-[11px] text-slate-400 dark:text-slate-500 italic">理由: {article.aiTriageReason}</p>
           )}
 
-          {article.aiCommentsInsight && article.aiCommentsInsight !== '暂无关键争议补充' && (
-            <div className="pt-1.5 border-t border-slate-200/60 dark:border-slate-800 flex items-start gap-1.5 text-[11px] text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-950/30 p-1.5 rounded-lg">
+          {/* 深度精读独享：评论区高赞焦点与争议洞察 */}
+          {article.aiReadingMode === 'deep' && article.aiCommentsInsight && article.aiCommentsInsight !== '暂无关键争议补充' && (
+            <div className="pt-1.5 border-t border-slate-200/60 dark:border-slate-800 flex items-start gap-1.5 text-[11px] text-indigo-700 dark:text-indigo-300 bg-indigo-50/50 dark:bg-indigo-950/30 p-2 rounded-xl">
               <MessageSquareQuote className="w-3.5 h-3.5 shrink-0 mt-0.5 text-indigo-500" />
               <p className="line-clamp-2 leading-relaxed">
-                <span className="font-semibold mr-1">热评争议与补充:</span>
+                <span className="font-semibold mr-1">💬 热评争议与实践补充:</span>
                 {article.aiCommentsInsight}
               </p>
             </div>
@@ -314,8 +352,29 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
         </div>
       ) : (
         <p className="mt-2 text-xs text-slate-400 dark:text-slate-500 line-clamp-2 leading-relaxed">
-          {article.fullContent || '点击右侧 AI 按钮即可一键摘读文章提炼要点与分拣建议...'}
+          {article.fullContent ? `全文共 ${totalLength} 字。点击下方粗读或深度精读...` : '暂无完整正文文本'}
         </p>
+      )}
+
+      {/* 粗读截断警示与全文深读引导条（当文章超 3000 字且尚未深读时必须警示） */}
+      {isTruncated && (
+        <div className="mt-2.5 p-2.5 rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200/80 dark:border-amber-900/60 flex items-center justify-between text-xs text-amber-800 dark:text-amber-200 shadow-sm animate-fade-in">
+          <div className="flex items-center gap-1.5 truncate mr-2">
+            <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
+            <span className="truncate text-[11px] leading-tight">
+              正文共 <strong>{totalLength}</strong> 字，粗读仅读前 3000 字（可能遗漏核心方案）
+            </span>
+          </div>
+          <button
+            onClick={handleDeepRead}
+            disabled={!!analyzingMode}
+            className="shrink-0 flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-semibold text-[11px] shadow-sm transition active:scale-95 disabled:opacity-50"
+            title="通读全文不限字数长文本，并抓取评论区神评 Top 5 一并分析"
+          >
+            <Sparkles className={`w-3 h-3 ${analyzingMode === 'deep' ? 'animate-spin' : ''}`} />
+            <span>{analyzingMode === 'deep' ? '深读中...' : '全文深读 (+读热评)'}</span>
+          </button>
+        </div>
       )}
 
       {/* 底部功能条 */}
@@ -329,15 +388,79 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
         <div className="flex items-center gap-1.5">
           {!isTrashView ? (
             <>
-              {/* AI 读完/提炼 */}
-              <button
-                onClick={handleAI}
-                disabled={analyzing}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/50 transition font-medium text-xs disabled:opacity-50"
-              >
-                <Sparkles className={`w-3.5 h-3.5 ${analyzing ? 'animate-spin' : ''}`} />
-                {analyzing ? '分析中...' : article.aiSummary ? '重读' : 'AI摘读'}
-              </button>
+              {/* AI 粗读 / 深读 组合按钮 */}
+              <div className="relative">
+                <div className="inline-flex rounded-lg shadow-sm">
+                  {/* 主触发按钮 */}
+                  <button
+                    onClick={isTruncated ? handleDeepRead : handleQuickRead}
+                    disabled={!!analyzingMode}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-l-lg font-medium text-xs transition disabled:opacity-50 ${
+                      isTruncated
+                        ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm'
+                        : article.aiReadingMode === 'deep'
+                        ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-600 dark:text-purple-400 hover:bg-purple-100'
+                        : 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100'
+                    }`}
+                    title={isTruncated ? '文章超 3000 字，点击执行全文深读' : '快速粗读 (仅正文3000字)'}
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 ${analyzingMode ? 'animate-spin' : ''}`} />
+                    <span>
+                      {analyzingMode === 'deep'
+                        ? '深读中...'
+                        : analyzingMode === 'quick'
+                        ? '粗读中...'
+                        : isTruncated
+                        ? '全文深读'
+                        : article.aiSummary
+                        ? article.aiReadingMode === 'deep' ? '重新精读' : '重读'
+                        : 'AI粗读'}
+                    </span>
+                  </button>
+
+                  {/* 模式选择下拉箭 */}
+                  <button
+                    onClick={() => setShowAIMenu(!showAIMenu)}
+                    disabled={!!analyzingMode}
+                    className={`px-1 rounded-r-lg border-l border-black/10 dark:border-white/10 transition ${
+                      isTruncated
+                        ? 'bg-amber-600 text-white hover:bg-amber-700'
+                        : article.aiReadingMode === 'deep'
+                        ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300'
+                        : 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300'
+                    }`}
+                    title="选择阅读模式"
+                  >
+                    <ChevronDown className="w-3 h-3" />
+                  </button>
+                </div>
+
+                {/* AI 模式切换弹出菜单 */}
+                {showAIMenu && (
+                  <div className="absolute right-0 bottom-full mb-1 w-48 bg-white dark:bg-slate-800 shadow-xl rounded-xl border border-slate-100 dark:border-slate-700 py-1.5 z-30 animate-fade-in text-xs space-y-0.5">
+                    <button
+                      onClick={handleQuickRead}
+                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-blue-50 dark:hover:bg-blue-950/30 text-slate-700 dark:text-slate-300 text-left"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                        <span>AI 快速粗读</span>
+                      </span>
+                      <span className="text-[10px] text-slate-400">正文3000字</span>
+                    </button>
+                    <button
+                      onClick={handleDeepRead}
+                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/30 text-purple-700 dark:text-purple-300 text-left font-medium"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <BookOpen className="w-3.5 h-3.5 text-purple-500" />
+                        <span>全文深度精读</span>
+                      </span>
+                      <span className="text-[10px] text-purple-500">全文+热评</span>
+                    </button>
+                  </div>
+                )}
+              </div>
 
               {/* 转移到其他收藏夹 */}
               <div className="relative">

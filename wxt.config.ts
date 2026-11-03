@@ -8,7 +8,7 @@ export default defineConfig({
     plugins: [tailwindcss()],
   }),
   manifest: {
-    name: '知乎收藏夹 Pro · MoonDigest (知乎摘读与分拣台)',
+    name: '知流 · ZhihuFlow (知乎摘读与分拣台)',
     description: '用 AI 读完并分拣知乎收藏夹：卡片流速览、AI 观点提炼、批量重分类/取消收藏、Markdown & Obsidian 导出',
     version: '1.0.0',
     permissions: [
