@@ -30,6 +30,14 @@ import { ArticleCard } from '../components/ArticleCard';
 import { SettingsModal } from '../components/SettingsModal';
 import { DescriptionModal } from '../components/DescriptionModal';
 import { AutoOrganizeModal } from '../components/AutoOrganizeModal';
+import { AIQueueBar } from '../components/AIQueueBar';
+import { 
+  type AIQueueState, 
+  type AIQueueTask, 
+  loadQueueFromStorage, 
+  saveQueueToStorage, 
+  clearQueueStorage 
+} from '../services/aiQueue';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
@@ -73,6 +81,23 @@ export const Dashboard: React.FC = () => {
 
   // 浮动 Toast 提示 (带撤销按钮)
   const [toastMsg, setToastMsg] = useState<{ text: string; articleId?: string } | null>(null);
+
+  // AI 读取分拣持久化任务队列 (MoonDigest 风格，刷新不丢失进度，支持随时暂停/继续)
+  const [queueState, setQueueState] = useState<AIQueueState>(() => loadQueueFromStorage());
+  const queueStatusRef = useRef<AIQueueState['status']>(queueState.status);
+  const isProcessingRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    queueStatusRef.current = queueState.status;
+  }, [queueState.status]);
+
+  // 初始化时若检测到持久化队列中有待处理任务，提示用户
+  useEffect(() => {
+    const pendingCount = queueState.tasks.filter((t) => t.status === 'pending' || t.status === 'processing').length;
+    if (pendingCount > 0 && queueState.status === 'paused') {
+      setToastMsg({ text: `已从本地安全恢复 AI 分拣队列（剩余 ${pendingCount} 篇待处理，可随时点击继续）` });
+    }
+  }, []);
 
   const sidebarFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -285,7 +310,80 @@ export const Dashboard: React.FC = () => {
     });
   };
 
-  // 批量 AI 分拣 (支持粗读与精读)
+  // 核心队列执行器：逐篇处理任务，支持实时暂停、取消与异常容错
+  const runQueueLoop = async (tasksList: AIQueueTask[], mode: 'quick' | 'deep') => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    queueStatusRef.current = 'running';
+
+    const tasks = [...tasksList];
+
+    for (let i = 0; i < tasks.length; i++) {
+      // 循环开始前检查是否已暂停或清空
+      if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        break;
+      }
+
+      const task = tasks[i];
+      if (task.status === 'done') continue;
+
+      // 标记当前任务为 processing 状态
+      task.status = 'processing';
+      task.updatedAt = Date.now();
+      const currentProgressState: AIQueueState = {
+        status: 'running',
+        mode,
+        tasks: [...tasks],
+        currentTitle: task.title,
+        currentArticleId: task.articleId,
+      };
+      setQueueState(currentProgressState);
+      saveQueueToStorage(currentProgressState);
+
+      try {
+        const article = await db.articles.get(task.articleId);
+        if (!article) {
+          task.status = 'failed';
+          task.error = '文章不存在或已在知乎失效';
+        } else {
+          await handleAnalyzeSingle(article, task.mode);
+          task.status = 'done';
+        }
+      } catch (err: any) {
+        console.error('AI 队列处理任务失败:', err);
+        task.status = 'failed';
+        task.error = err?.message || '分析失败';
+      }
+
+      task.updatedAt = Date.now();
+
+      // 单篇处理完后再次检查暂停状态
+      const hasPending = tasks.some((t) => t.status === 'pending');
+      const nextStatus = queueStatusRef.current === 'paused'
+        ? 'paused'
+        : hasPending
+        ? 'running'
+        : 'completed';
+
+      const stepState: AIQueueState = {
+        status: nextStatus,
+        mode,
+        tasks: [...tasks],
+        currentTitle: undefined,
+        currentArticleId: undefined,
+      };
+      setQueueState(stepState);
+      saveQueueToStorage(stepState);
+
+      if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        break;
+      }
+    }
+
+    isProcessingRef.current = false;
+  };
+
+  // 批量 AI 分拣：加入持久化任务队列并启动 (支持随时暂停与刷新断点恢复)
   const handleBatchAI = async (mode: 'quick' | 'deep' = 'quick') => {
     const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
     if (targets.length === 0) {
@@ -293,19 +391,76 @@ export const Dashboard: React.FC = () => {
       return;
     }
 
-    setLoading(true);
-    let done = 0;
-    const modeLabel = mode === 'deep' ? '深度精读' : '快速粗读';
-    for (const item of targets) {
-      setSyncProgress(`正在进行 AI ${modeLabel} (${++done}/${targets.length}): ${item.title.slice(0, 15)}...`);
-      try {
-        await handleAnalyzeSingle(item, mode);
-      } catch (e) {
-        console.warn('单条 AI 分析失败:', e);
-      }
-    }
-    setLoading(false);
-    setSyncProgress('');
+    // 构建新任务列表
+    const newTasks: AIQueueTask[] = targets.map((item) => ({
+      articleId: item.id,
+      title: item.title,
+      mode,
+      status: 'pending',
+      updatedAt: Date.now(),
+    }));
+
+    // 若当前已有未完成任务，智能合并并去重
+    const newIds = new Set(newTasks.map((t) => t.articleId));
+    const previousUnfinished = queueState.tasks.filter(
+      (t) => (t.status === 'pending' || t.status === 'processing') && !newIds.has(t.articleId)
+    );
+
+    const mergedTasks = [...previousUnfinished, ...newTasks];
+
+    const nextState: AIQueueState = {
+      status: 'running',
+      mode,
+      tasks: mergedTasks,
+      currentTitle: mergedTasks[0]?.title,
+      currentArticleId: mergedTasks[0]?.articleId,
+    };
+
+    setQueueState(nextState);
+    saveQueueToStorage(nextState);
+    setSelectedIds(new Set()); // 清空勾选以便用户继续操作其他内容
+    showToast(`🚀 已将 ${newTasks.length} 篇内容加入 AI 分拣队列并启动！`);
+
+    // 启动处理队列
+    runQueueLoop(mergedTasks, mode);
+  };
+
+  // 暂停队列处理
+  const handlePauseQueue = () => {
+    queueStatusRef.current = 'paused';
+    setQueueState((prev) => {
+      const next: AIQueueState = {
+        ...prev,
+        status: 'paused',
+        currentTitle: undefined,
+        currentArticleId: undefined,
+      };
+      saveQueueToStorage(next);
+      return next;
+    });
+    showToast('⏸️ AI 分拣队列已暂停，已处理的分类进度全部保存在本地！');
+  };
+
+  // 恢复继续队列处理
+  const handleResumeQueue = () => {
+    queueStatusRef.current = 'running';
+    const nextState: AIQueueState = {
+      ...queueState,
+      status: 'running',
+    };
+    setQueueState(nextState);
+    saveQueueToStorage(nextState);
+    showToast('▶️ AI 分拣队列继续执行...');
+    runQueueLoop(queueState.tasks, queueState.mode);
+  };
+
+  // 清空/终止队列
+  const handleClearQueue = () => {
+    queueStatusRef.current = 'idle';
+    isProcessingRef.current = false;
+    clearQueueStorage();
+    setQueueState({ status: 'idle', mode: 'quick', tasks: [] });
+    showToast('已清空 AI 分拣队列');
   };
 
   // 批量移动 (记录历史用于撤销)
@@ -948,6 +1103,7 @@ export const Dashboard: React.FC = () => {
                   collections={collections}
                   isSelected={selectedIds.has(article.id)}
                   isTrashView={isTrashView}
+                  isQueueProcessing={queueState.currentArticleId === article.id}
                   onSelect={(sel) => {
                     const next = new Set(selectedIds);
                     sel ? next.add(article.id) : next.delete(article.id);
@@ -1007,6 +1163,14 @@ export const Dashboard: React.FC = () => {
           )}
         </div>
       )}
+
+      {/* AI 任务队列持久化控制面板 (支持暂停、继续、清空，刷新自动断点保护) */}
+      <AIQueueBar
+        queueState={queueState}
+        onPause={handlePauseQueue}
+        onResume={handleResumeQueue}
+        onClear={handleClearQueue}
+      />
 
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
       <AutoOrganizeModal

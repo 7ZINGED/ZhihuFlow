@@ -28,6 +28,7 @@ interface ArticleCardProps {
   collections: ZhihuCollection[];
   isSelected: boolean;
   isTrashView?: boolean;
+  isQueueProcessing?: boolean; // 新增：是否正在被 AI 队列处理中
   onSelect: (selected: boolean) => void;
   onQuickRead: () => Promise<void>; // 快速粗读 (正文3000字，不读评论)
   onDeepRead: () => Promise<void>;  // 深度精读 (全文不限字数 + 热评Top5)
@@ -45,6 +46,7 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   collections,
   isSelected,
   isTrashView = false,
+  isQueueProcessing = false,
   onSelect,
   onQuickRead,
   onDeepRead,
@@ -394,19 +396,23 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
                   {/* 主触发按钮 */}
                   <button
                     onClick={isTruncated ? handleDeepRead : handleQuickRead}
-                    disabled={!!analyzingMode}
+                    disabled={!!analyzingMode || isQueueProcessing}
                     className={`flex items-center gap-1 px-2.5 py-1 rounded-l-lg font-medium text-xs transition disabled:opacity-50 ${
-                      isTruncated
+                      isQueueProcessing
+                        ? 'bg-blue-600 text-white animate-pulse'
+                        : isTruncated
                         ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm'
                         : article.aiReadingMode === 'deep'
                         ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-600 dark:text-purple-400 hover:bg-purple-100'
                         : 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100'
                     }`}
-                    title={isTruncated ? '文章超 3000 字，点击执行全文深读' : '快速粗读 (仅正文3000字)'}
+                    title={isQueueProcessing ? 'AI 队列正在分析中...' : isTruncated ? '文章超 3000 字，点击执行全文深读' : '快速粗读 (仅正文3000字)'}
                   >
-                    <Sparkles className={`w-3.5 h-3.5 ${analyzingMode ? 'animate-spin' : ''}`} />
+                    <Sparkles className={`w-3.5 h-3.5 ${analyzingMode || isQueueProcessing ? 'animate-spin' : ''}`} />
                     <span>
-                      {analyzingMode === 'deep'
+                      {isQueueProcessing
+                        ? '队列分析中'
+                        : analyzingMode === 'deep'
                         ? '深读中...'
                         : analyzingMode === 'quick'
                         ? '粗读中...'
@@ -421,7 +427,7 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
                   {/* 模式选择下拉箭 */}
                   <button
                     onClick={() => setShowAIMenu(!showAIMenu)}
-                    disabled={!!analyzingMode}
+                    disabled={!!analyzingMode || isQueueProcessing}
                     className={`px-1 rounded-r-lg border-l border-black/10 dark:border-white/10 transition ${
                       isTruncated
                         ? 'bg-amber-600 text-white hover:bg-amber-700'
