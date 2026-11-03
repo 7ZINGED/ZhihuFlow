@@ -22,6 +22,7 @@ import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
 import { SettingsModal } from '../components/SettingsModal';
 import { DescriptionModal } from '../components/DescriptionModal';
+import { AutoOrganizeModal } from '../components/AutoOrganizeModal';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
@@ -46,6 +47,7 @@ export const Dashboard: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [syncProgress, setSyncProgress] = useState<string>('');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isAutoOrganizeOpen, setIsAutoOrganizeOpen] = useState(false);
 
   // 描述生成弹窗状态
   const [descModalData, setDescModalData] = useState<{
@@ -378,6 +380,15 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
 
+          {/* AI 智能一键整理主按钮 */}
+          <button
+            onClick={() => setIsAutoOrganizeOpen(true)}
+            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition transform active:scale-95"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>AI 一键整理与重分类</span>
+          </button>
+
           {/* 收藏夹列表 */}
           <div className="space-y-1">
             <div className="flex items-center justify-between px-2 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
@@ -648,6 +659,14 @@ export const Dashboard: React.FC = () => {
       </div>
 
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <AutoOrganizeModal
+        isOpen={isAutoOrganizeOpen}
+        onClose={() => setIsAutoOrganizeOpen(false)}
+        collections={collections}
+        onComplete={async () => {
+          await handleSyncCollections();
+        }}
+      />
       <DescriptionModal
         isOpen={descModalData.isOpen}
         collectionId={descModalData.colId}
