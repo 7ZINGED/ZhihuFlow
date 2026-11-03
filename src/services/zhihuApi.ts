@@ -222,10 +222,15 @@ function formatRawContent(raw: any, collectionId: string, collectionTitle: strin
     : `https://www.zhihu.com/${content.type}/${content.id}`;
 
   let cleanText = '';
-  if (content.content) {
+  if (typeof content.content === 'string') {
     cleanText = content.content.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
-  } else if (content.excerpt) {
+  } else if (typeof content.excerpt === 'string') {
     cleanText = content.excerpt.replace(/<[^>]+>/g, '').trim();
+  } else if (typeof content.description === 'string') {
+    cleanText = content.description.replace(/<[^>]+>/g, '').trim();
+  } else if (typeof content.content === 'object' && content.content !== null) {
+    // 兼容部分专栏/问答把 content 作为富文本对象或包含 text 字段
+    cleanText = content.content.text || content.content.body || JSON.stringify(content.content);
   }
 
   return {
