@@ -10,7 +10,8 @@ import {
   History,
   Trash2,
   CheckCircle2,
-  FolderOpen
+  FolderOpen,
+  RotateCcw
 } from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { analyzeArticleWithAI } from '../services/ai';
@@ -99,6 +100,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
   const [running, setRunning] = useState<boolean>(false);
   const [planList, setPlanList] = useState<PlanItem[]>([]);
   const [progressText, setProgressText] = useState<string>('');
+  const [filterStatus, setFilterStatus] = useState<'all' | 'pending' | 'skipped' | 'success'>('all');
   
   // 草稿状态
   const [draft, setDraft] = useState<AutoOrganizeDraft | null>(null);
@@ -208,13 +210,14 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           const aiRes = await analyzeArticleWithAI(
             article,
             availableTargets,
-            { mode: 'quick' }
+            { mode: 'categorize' }
           );
 
           // 寻找匹配的目标收藏夹
+          const recCat = (aiRes.recommendedCategory || '').trim().toLowerCase();
           const target = availableTargets.find(
-            t => t.title.trim() === aiRes.recommendedCategory.trim() ||
-                 aiRes.recommendedCategory.includes(t.title)
+            t => t.title.trim().toLowerCase() === recCat ||
+                 (recCat && (recCat.includes(t.title.toLowerCase()) || t.title.toLowerCase().includes(recCat)))
           );
 
           const fromColTitle = collections.find(c => c.id === article.collectionId)?.title || article.collectionTitle || '原收藏夹';
@@ -362,8 +365,61 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
     onComplete();
   };
 
+  // 手动修改单篇文章的目标收藏夹
+  const handleUpdateItemTarget = (articleId: string, newTargetColId: string) => {
+    const updated = planList.map((item) => {
+      if (item.article.id !== articleId) return item;
+      if (newTargetColId === item.article.collectionId) {
+        return {
+          ...item,
+          toCollection: { id: item.article.collectionId, title: item.fromCollection },
+          status: 'skipped' as const,
+        };
+      } else {
+        const target = collections.find((c) => c.id === newTargetColId);
+        return {
+          ...item,
+          toCollection: target || item.toCollection,
+          status: 'pending' as const,
+        };
+      }
+    });
+
+    setPlanList(updated);
+    if (draft) {
+      const updatedDraft = {
+        ...draft,
+        plans: updated,
+        updatedAt: Date.now(),
+      };
+      setDraft(updatedDraft);
+      saveDraftToStorage(updatedDraft);
+    }
+  };
+
+  // 重新从头开始 AI 预演分析
+  const handleRerunAll = () => {
+    if (confirm('确定清空当前预演方案并重新开始 AI 预演分析吗？')) {
+      clearDraftStorage();
+      setDraft(null);
+      setPlanList([]);
+      setTimeout(() => {
+        handleStart(false);
+      }, 50);
+    }
+  };
+
   const pendingCount = planList.filter(p => p.status === 'pending').length;
+  const skippedCount = planList.filter(p => p.status === 'skipped').length;
+  const successCount = planList.filter(p => p.status === 'success').length;
   const isPaused = !running && draft && draft.plans.length < draft.totalArticlesCount && draft.plans.length > 0;
+
+  const displayedPlans = planList.filter((p) => {
+    if (filterStatus === 'pending') return p.status === 'pending';
+    if (filterStatus === 'skipped') return p.status === 'skipped';
+    if (filterStatus === 'success') return p.status === 'success';
+    return true;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm animate-fade-in">
@@ -537,11 +593,63 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
         </div>
 
         {/* 进度提示与操作条 */}
-        <div className="flex items-center justify-between pt-1 shrink-0 text-xs">
-          <span className="text-blue-600 dark:text-blue-400 font-medium truncate max-w-[50%] animate-pulse">
-            {progressText}
-          </span>
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-between gap-2 pt-1 shrink-0 text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            {progressText && (
+              <span className="text-blue-600 dark:text-blue-400 font-medium truncate max-w-[240px] animate-pulse">
+                {progressText}
+              </span>
+            )}
+            {planList.length > 0 && !running && (
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg text-[11px]">
+                <button
+                  type="button"
+                  onClick={() => setFilterStatus('all')}
+                  className={`px-2 py-0.5 rounded-md transition ${filterStatus === 'all' ? 'bg-white dark:bg-slate-700 font-bold shadow-xs text-slate-800 dark:text-slate-100' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  全部 ({planList.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterStatus('pending')}
+                  className={`px-2 py-0.5 rounded-md transition ${filterStatus === 'pending' ? 'bg-amber-100 dark:bg-amber-950 font-bold text-amber-700 dark:text-amber-300 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  待移动 ({pendingCount})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFilterStatus('skipped')}
+                  className={`px-2 py-0.5 rounded-md transition ${filterStatus === 'skipped' ? 'bg-slate-200 dark:bg-slate-700 font-bold text-slate-700 dark:text-slate-200 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                >
+                  保留原位 ({skippedCount})
+                </button>
+                {successCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setFilterStatus('success')}
+                    className={`px-2 py-0.5 rounded-md transition ${filterStatus === 'success' ? 'bg-emerald-100 dark:bg-emerald-950 font-bold text-emerald-700 dark:text-emerald-300 shadow-xs' : 'text-slate-500 hover:text-slate-700'}`}
+                  >
+                    已移至知乎 ({successCount})
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 ml-auto">
+            {/* 重新从头 AI 预演按钮 */}
+            {!running && planList.length > 0 && (
+              <button
+                type="button"
+                onClick={handleRerunAll}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 font-medium transition text-xs"
+                title="清空当前方案，重新调用大模型进行重分类预演"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                重新 AI 预演
+              </button>
+            )}
+
             {/* 暂停按钮 */}
             {running && (
               <button
@@ -553,15 +661,15 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               </button>
             )}
 
-            {/* 一键应用当前已提炼出的预演方案 (支持部分方案先行落地) */}
+            {/* 一键应用移动方案到知乎 (支持部分或全部方案先行落地) */}
             {!running && pendingCount > 0 && (
               <button
                 onClick={handleApplyPendingPlans}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-sm transition"
-                title="即使未全部分析完，也可直接应用目前已有的建议移动项"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium shadow-md shadow-emerald-600/20 active:scale-95 transition"
+                title="将建议移动的文章真正调用知乎收藏夹接口进行移动"
               >
                 <CheckCircle2 className="w-3.5 h-3.5" />
-                应用当前方案 ({pendingCount} 篇)
+                应用移动方案到知乎 ({pendingCount} 篇)
               </button>
             )}
 
@@ -570,7 +678,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               <button
                 onClick={() => handleStart(isPaused)}
                 disabled={running || sourceColIds.size === 0 || targetColIds.size === 0}
-                className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 transition"
+                className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 active:scale-95 transition"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 {isPaused ? '继续分析未完成' : isDryRun ? '开始试运行预演' : '直接开始整理'}
@@ -578,6 +686,20 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
             )}
           </div>
         </div>
+
+        {/* 方案结果提示与操作引导 */}
+        {!running && planList.length > 0 && pendingCount === 0 && (
+          <div className="p-3 rounded-xl bg-blue-50/80 dark:bg-blue-950/40 border border-blue-200 dark:border-blue-900/60 text-xs text-blue-800 dark:text-blue-300 flex items-start gap-2.5">
+            <span className="text-base shrink-0">💡</span>
+            <div className="space-y-1">
+              <p className="font-semibold">当前所有内容均标记为【保留原位】（暂无待移动项）</p>
+              <p className="text-[11px] opacity-90 leading-relaxed">
+                • <b>如何实际落地移动？</b> 您可直接在下方列表中，点击目标收藏夹下拉框将文章指派给新的收藏夹（指派后将自动变为待移动，右上角会出现绿色的「应用移动方案到知乎」按钮）。<br />
+                • <b>或者</b> 点击右上角「<span className="font-semibold underline">重新 AI 预演</span>」，系统将重新使用最新的词条分类模型，重新推荐跨收藏夹归宿！
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* 方案结果列表 */}
         <div className="flex-1 overflow-y-auto space-y-2 pr-1 border-t border-slate-200/60 dark:border-slate-800 pt-3 text-xs">
@@ -587,43 +709,73 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               <p>勾选需要整理的多个源收藏夹并点击上方开始，AI 将逐篇研读正文并推荐最贴切的目的地</p>
               <p className="text-[11px] text-slate-400/80">支持多源多目标交叉归类、随时暂停、刷新断点保留，可对已提炼出的部分方案随时落地生效</p>
             </div>
+          ) : displayedPlans.length === 0 ? (
+            <div className="h-28 flex flex-col items-center justify-center text-slate-400 text-xs">
+              <p>当前筛选分类下无文章</p>
+            </div>
           ) : (
-            planList.map((item, idx) => (
+            displayedPlans.map((item) => (
               <div
-                key={idx}
-                className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60 flex items-center justify-between gap-3 shadow-xs"
+                key={item.article.id}
+                className={`p-3 rounded-xl border transition flex items-center justify-between gap-3 shadow-xs ${
+                  item.status === 'pending'
+                    ? 'border-amber-200 dark:border-amber-900/50 bg-amber-50/20 dark:bg-amber-950/20'
+                    : item.status === 'success'
+                    ? 'border-emerald-200 dark:border-emerald-900/50 bg-emerald-50/20 dark:bg-emerald-950/20'
+                    : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/60'
+                }`}
               >
-                <div className="flex-1 truncate">
+                <div className="flex-1 min-w-0">
                   <h4 className="font-semibold text-slate-900 dark:text-slate-100 truncate" title={item.article.title}>
                     {item.article.title}
                   </h4>
-                  <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
-                    <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-medium">{item.fromCollection}</span>
-                    <ArrowRight className="w-3 h-3 text-slate-400" />
-                    <span className="px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-semibold">
-                      {item.toCollection.title}
+                  <div className="flex flex-wrap items-center gap-2 mt-1.5 text-[11px] text-slate-500">
+                    <span className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 font-medium">
+                      {item.fromCollection}
                     </span>
+                    <ArrowRight className="w-3 h-3 text-slate-400 shrink-0" />
+                    
+                    {/* 目标收藏夹交互选择下拉框：用户可随时自由修改归宿 */}
+                    <select
+                      value={item.toCollection.id}
+                      disabled={running || item.status === 'success'}
+                      onChange={(e) => handleUpdateItemTarget(item.article.id, e.target.value)}
+                      className="px-2 py-0.5 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400 font-semibold cursor-pointer focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      title="点击可自由更改此文章的目标归宿收藏夹"
+                    >
+                      {collections.map((col) => (
+                        <option key={col.id} value={col.id}>
+                          {col.title} {col.id === item.article.collectionId ? '(原位)' : ''}
+                        </option>
+                      ))}
+                    </select>
+
+                    {item.reason && (
+                      <span className="text-[10px] text-slate-400 truncate max-w-[200px]" title={item.reason}>
+                        ({item.reason})
+                      </span>
+                    )}
                   </div>
                 </div>
 
-                <div className="shrink-0">
+                <div className="shrink-0 flex items-center gap-2">
                   {item.status === 'pending' && (
-                    <span className="text-[11px] px-2 py-1 rounded-md bg-amber-50 dark:bg-amber-950/40 text-amber-600 font-medium">
-                      预演建议移动
+                    <span className="text-[11px] px-2.5 py-1 rounded-md bg-amber-100/80 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 font-medium border border-amber-300/60 dark:border-amber-800/60">
+                      待移动
                     </span>
                   )}
                   {item.status === 'skipped' && (
-                    <span className="text-[11px] px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-500">
+                    <span className="text-[11px] px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-400">
                       保留原位
                     </span>
                   )}
                   {item.status === 'success' && (
-                    <span className="text-[11px] px-2 py-1 rounded-md bg-emerald-50 dark:bg-emerald-950/40 text-emerald-600 font-medium flex items-center gap-1">
-                      <CheckCircle className="w-3 h-3" /> 已移至知乎
+                    <span className="text-[11px] px-2.5 py-1 rounded-md bg-emerald-100/80 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-medium border border-emerald-300/60 dark:border-emerald-800/60 flex items-center gap-1">
+                      <CheckCircle className="w-3 h-3 text-emerald-600" /> 已移至知乎
                     </span>
                   )}
                   {item.status === 'error' && (
-                    <span className="text-[11px] px-2 py-1 rounded-md bg-red-50 text-red-600 font-medium flex items-center gap-1">
+                    <span className="text-[11px] px-2 py-1 rounded-md bg-rose-50 text-rose-600 font-medium flex items-center gap-1">
                       <AlertCircle className="w-3 h-3" /> {item.errorMsg || '失败'}
                     </span>
                   )}
