@@ -111,11 +111,35 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       const savedDraft = loadDraftFromStorage();
-      if (savedDraft) {
+      if (savedDraft && savedDraft.plans && savedDraft.plans.length > 0) {
         setDraft(savedDraft);
         // 如果当前没有正在分析的方案，载入草稿方案便于用户查看
         if (planList.length === 0) {
-          setPlanList(savedDraft.plans);
+          const sourceIds = savedDraft.sourceColIds?.length > 0 ? savedDraft.sourceColIds : Array.from(sourceColIds);
+          import('../db').then(({ db }) => {
+            db.articles.where('collectionId').anyOf(sourceIds).toArray().then((dbArticles) => {
+              const articleMap = new Map(dbArticles.map((a) => [a.id, a]));
+              const calibratedPlans = savedDraft.plans.map((p) => {
+                const liveArt = articleMap.get(p.article.id) || p.article;
+                if (liveArt.aiCategory && liveArt.aiCategory !== '其他') {
+                  const target = collections.find(
+                    (c) => c.title === liveArt.aiCategory || (liveArt.aiCategory && liveArt.aiCategory.includes(c.title))
+                  );
+                  if (target) {
+                    return {
+                      ...p,
+                      article: liveArt,
+                      toCollection: target,
+                      status: (target.id !== liveArt.collectionId ? 'pending' : 'skipped') as const,
+                      reason: liveArt.aiCategoryReason || '继承自分拣台AI推荐',
+                    };
+                  }
+                }
+                return { ...p, article: liveArt };
+              });
+              setPlanList(calibratedPlans);
+            });
+          });
           if (savedDraft.sourceColIds && savedDraft.sourceColIds.length > 0) {
             setSourceColIds(new Set(savedDraft.sourceColIds));
           }
@@ -124,6 +148,34 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
             setTargetColIds(new Set(savedDraft.targetColIds));
           }
         }
+      } else if (planList.length === 0) {
+        // 无历史草稿时，自动从数据库中加载已有 aiCategory 的文章作为现成方案！
+        const sourceIds = Array.from(sourceColIds);
+        import('../db').then(({ db }) => {
+          db.articles.where('collectionId').anyOf(sourceIds).toArray().then((dbArticles) => {
+            const prePlans: PlanItem[] = [];
+            for (const art of dbArticles) {
+              if (art.aiCategory && art.aiCategory !== '其他') {
+                const target = collections.find(
+                  (c) => c.title === art.aiCategory || (art.aiCategory && art.aiCategory.includes(c.title))
+                );
+                if (target) {
+                  const fromColTitle = collections.find((c) => c.id === art.collectionId)?.title || art.collectionTitle || '原收藏夹';
+                  prePlans.push({
+                    article: art,
+                    fromCollection: fromColTitle,
+                    toCollection: target,
+                    status: target.id !== art.collectionId ? 'pending' : 'skipped',
+                    reason: art.aiCategoryReason || '继承自分拣台AI推荐',
+                  });
+                }
+              }
+            }
+            if (prePlans.length > 0) {
+              setPlanList(prePlans);
+            }
+          });
+        });
       }
     }
   }, [isOpen]);
@@ -222,6 +274,13 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           );
 
           const fromColTitle = collections.find(c => c.id === article.collectionId)?.title || article.collectionTitle || '原收藏夹';
+
+          if (target) {
+            db.articles.update(article.id, {
+              aiCategory: target.title,
+              aiCategoryReason: aiRes.categorizeReason || 'AI整理建议',
+            }).catch(console.error);
+          }
 
           if (!target || target.id === article.collectionId) {
             // 归类为相同收藏夹，或者未建议移动
@@ -387,6 +446,19 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
     });
 
     setPlanList(updated);
+    
+    // 双向同步：手动修改后立即同步回本地数据库，保证主分拣台卡片徽标即时保持一致
+    const target = collections.find((c) => c.id === newTargetColId);
+    import('../db').then(({ db }) => {
+      const art = updated.find((i) => i.article.id === articleId)?.article;
+      if (art && target) {
+        db.articles.update(articleId, {
+          aiCategory: target.id !== art.collectionId ? target.title : '',
+          aiCategoryReason: target.id !== art.collectionId ? '用户手动指定目标归宿' : '',
+        }).catch(console.error);
+      }
+    });
+
     if (draft) {
       const updatedDraft = {
         ...draft,

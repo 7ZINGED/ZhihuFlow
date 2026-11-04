@@ -67,6 +67,11 @@ export interface AISettings {
   maxTagCount?: number;            // AI 生成标签数量上限 (1 ~ 5，默认 2)
   allowModifyTags?: boolean;        // 重新分类时允许覆盖修改已有标签 (默认 true)
   allowModifyDescription?: boolean; // AI 分类时允许生成/修改文章摘要描述 (默认 true)
+  batchLimitQuick?: number;         // 快速粗读单批上限 (默认 30)
+  batchLimitCategorize?: number;    // 词条分类单批上限 (默认 20)
+  batchLimitDeep?: number;          // 全文精读单批上限 (默认 10)
+  maxGlobalTags?: number;           // 批次全局总标签数上限 (默认 8)
+  adaptiveGlobalTags?: boolean;     // 自适应总标签数模式 (默认 true)
 }
 
 export class ZhihuDigestDatabase extends Dexie {

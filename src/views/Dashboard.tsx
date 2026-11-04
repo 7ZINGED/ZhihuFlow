@@ -54,6 +54,7 @@ import {
 import { 
   quickTriageArticleWithAI,
   categorizeArticleWithAI,
+  synthesizeBatchTaxonomy,
   deepReadArticleWithAI,
   analyzeArticleWithAI, 
   generateCollectionDescription,
@@ -322,7 +323,8 @@ export const Dashboard: React.FC = () => {
   // 递进式 AI 处理：Stage 1 粗读初筛 / Stage 2 词条分类(受设置控制) / Stage 3 深度精读(+热评Top5)
   const handleAnalyzeSingle = async (
     article: ZhihuArticleItem,
-    mode: 'quick' | 'categorize' | 'deep' = 'quick'
+    mode: 'quick' | 'categorize' | 'deep' = 'quick',
+    batchTaxonomy?: string[]
   ) => {
     if (mode === 'quick') {
       const res = await quickTriageArticleWithAI(article, { maxChars: 3000 });
@@ -359,6 +361,7 @@ export const Dashboard: React.FC = () => {
 
       const res = await categorizeArticleWithAI(article, collections, { 
         existingTags,
+        batchTaxonomy,
         maxTagCount,
         allowModifyDescription,
       });
@@ -412,6 +415,16 @@ export const Dashboard: React.FC = () => {
     const tasks = [...tasksList];
     let consecutiveErrors = 0;
 
+    const settings = await getAISettings();
+    let chunkSize = 20;
+    if (mode === 'quick') chunkSize = settings.batchLimitQuick || 30;
+    else if (mode === 'categorize') chunkSize = settings.batchLimitCategorize || 20;
+    else if (mode === 'deep') chunkSize = settings.batchLimitDeep || 10;
+    chunkSize = Math.max(1, chunkSize);
+
+    const totalChunks = Math.max(1, Math.ceil(tasks.length / chunkSize));
+    let currentBatchTaxonomy: string[] = queueState.synthesizedTaxonomy || [];
+
     for (let i = 0; i < tasks.length; i++) {
       // 循环开始前检查是否已暂停或清空
       if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
@@ -420,6 +433,32 @@ export const Dashboard: React.FC = () => {
 
       const task = tasks[i];
       if (task.status === 'done') continue;
+
+      const currentChunkNum = Math.floor(i / chunkSize) + 1;
+      const chunkInfo = {
+        currentChunk: currentChunkNum,
+        totalChunks,
+        chunkSize,
+      };
+
+      // 阶段 2 (Pass 1)：若进入新子批次且尚未生成收敛标签池，先综合提炼全局规范标签
+      if (mode === 'categorize' && (i % chunkSize === 0 || currentBatchTaxonomy.length === 0)) {
+        const chunkTasks = tasks.slice(i, i + chunkSize);
+        const chunkIds = chunkTasks.map((t) => t.articleId);
+        try {
+          const chunkArticles = await db.articles.where('id').anyOf(chunkIds).toArray();
+          if (chunkArticles.length > 0) {
+            showToast(`🏷️ [分批 ${currentChunkNum}/${totalChunks}] 正在综合提炼本批次全局收敛标签...`);
+            currentBatchTaxonomy = await synthesizeBatchTaxonomy(chunkArticles, {
+              maxGlobalTags: settings.maxGlobalTags,
+              adaptiveGlobalTags: settings.adaptiveGlobalTags,
+              customPrompt: settings.customCategorizePrompt,
+            });
+          }
+        } catch (e) {
+          console.warn('Pass 1 全局标签提炼异常:', e);
+        }
+      }
 
       // 标记当前任务为 processing 状态
       task.status = 'processing';
@@ -430,6 +469,8 @@ export const Dashboard: React.FC = () => {
         tasks: [...tasks],
         currentTitle: task.title,
         currentArticleId: task.articleId,
+        chunkInfo,
+        synthesizedTaxonomy: currentBatchTaxonomy,
       };
       setQueueState(currentProgressState);
       saveQueueToStorage(currentProgressState);
@@ -440,7 +481,8 @@ export const Dashboard: React.FC = () => {
           task.status = 'failed';
           task.error = '文章不存在或已在知乎失效';
         } else {
-          await handleAnalyzeSingle(article, task.mode);
+          // 阶段 2 (Pass 2)：基于 Pass 1 提炼出的全局标签池高精度对齐打标
+          await handleAnalyzeSingle(article, task.mode, currentBatchTaxonomy);
           task.status = 'done';
           consecutiveErrors = 0; // 成功则重置连续错误计数
         }
@@ -473,6 +515,8 @@ export const Dashboard: React.FC = () => {
         tasks: [...tasks],
         currentTitle: undefined,
         currentArticleId: undefined,
+        chunkInfo,
+        synthesizedTaxonomy: currentBatchTaxonomy,
       };
       setQueueState(stepState);
       saveQueueToStorage(stepState);
@@ -515,19 +559,38 @@ export const Dashboard: React.FC = () => {
 
     const mergedTasks = [...previousUnfinished, ...newTasks];
 
+    const settings = await getAISettings();
+    let chunkSize = 20;
+    if (mode === 'quick') chunkSize = settings.batchLimitQuick || 30;
+    else if (mode === 'categorize') chunkSize = settings.batchLimitCategorize || 20;
+    else if (mode === 'deep') chunkSize = settings.batchLimitDeep || 10;
+    chunkSize = Math.max(1, chunkSize);
+
+    const totalChunks = Math.max(1, Math.ceil(mergedTasks.length / chunkSize));
+    const chunkInfo = {
+      currentChunk: 1,
+      totalChunks,
+      chunkSize,
+    };
+
     const nextState: AIQueueState = {
       status: 'running',
       mode,
       tasks: mergedTasks,
       currentTitle: mergedTasks[0]?.title,
       currentArticleId: mergedTasks[0]?.articleId,
+      chunkInfo,
     };
 
     setQueueState(nextState);
     saveQueueToStorage(nextState);
     setSelectedIds(new Set()); // 清空勾选以便用户继续操作其他内容
     const modeLabel = mode === 'categorize' ? '词条分类' : mode === 'deep' ? '深度精读' : '快速粗读';
-    showToast(`🚀 已将 ${newTasks.length} 篇内容加入 AI [${modeLabel}] 队列并启动！`);
+    if (totalChunks > 1) {
+      showToast(`🚀 已将 ${newTasks.length} 篇内容切分为 ${totalChunks} 个子批次 (每批 ${chunkSize} 篇) 推进 AI [${modeLabel}]！`);
+    } else {
+      showToast(`🚀 已将 ${newTasks.length} 篇内容加入 AI [${modeLabel}] 队列并启动！`);
+    }
 
     // 启动处理队列
     runQueueLoop(mergedTasks, mode);

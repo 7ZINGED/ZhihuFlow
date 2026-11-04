@@ -42,6 +42,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     maxTagCount: 2,
     allowModifyTags: true,
     allowModifyDescription: true,
+    batchLimitQuick: 30,
+    batchLimitCategorize: 20,
+    batchLimitDeep: 10,
+    maxGlobalTags: 8,
+    adaptiveGlobalTags: true,
   });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -60,6 +65,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
           maxTagCount: s.maxTagCount || 2,
           allowModifyTags: s.allowModifyTags ?? true,
           allowModifyDescription: s.allowModifyDescription ?? true,
+          batchLimitQuick: s.batchLimitQuick ?? 30,
+          batchLimitCategorize: s.batchLimitCategorize ?? 20,
+          batchLimitDeep: s.batchLimitDeep ?? 10,
+          maxGlobalTags: s.maxGlobalTags ?? 8,
+          adaptiveGlobalTags: s.adaptiveGlobalTags ?? true,
         });
       });
       setMsg('');
@@ -432,6 +442,121 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                     </p>
                   </div>
                 </label>
+              </div>
+
+              {/* 4. 单批次处理上限与批次全局聚类设置 (可调无上限/下限自由设定) */}
+              <div className="p-3.5 rounded-2xl border border-blue-200/80 dark:border-blue-900/60 bg-blue-50/30 dark:bg-blue-950/20 space-y-3">
+                <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-100 text-xs">
+                  <Sliders className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span>单批次处理上限与全局标签聚类 (无上限/下限自由设定)</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {/* 粗读上限 */}
+                  <div className="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200/70 dark:border-slate-700/70 space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block">
+                      ⚡ 快速粗读单批上限：
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="1"
+                        value={settings.batchLimitQuick ?? 30}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setSettings({ ...settings, batchLimitQuick: isNaN(v) ? 1 : Math.max(1, v) });
+                        }}
+                        className="w-full px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <span className="text-[11px] text-slate-400 shrink-0">篇</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">默认 30 篇，任意设定</span>
+                  </div>
+
+                  {/* 分类上限 */}
+                  <div className="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200/70 dark:border-slate-700/70 space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block">
+                      🏷️ 词条分类单批上限：
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="1"
+                        value={settings.batchLimitCategorize ?? 20}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setSettings({ ...settings, batchLimitCategorize: isNaN(v) ? 1 : Math.max(1, v) });
+                        }}
+                        className="w-full px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <span className="text-[11px] text-slate-400 shrink-0">篇</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">默认 20 篇，任意设定</span>
+                  </div>
+
+                  {/* 精读上限 */}
+                  <div className="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200/70 dark:border-slate-700/70 space-y-1">
+                    <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block">
+                      📖 全文精读单批上限：
+                    </label>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="number"
+                        min="1"
+                        value={settings.batchLimitDeep ?? 10}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setSettings({ ...settings, batchLimitDeep: isNaN(v) ? 1 : Math.max(1, v) });
+                        }}
+                        className="w-full px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <span className="text-[11px] text-slate-400 shrink-0">篇</span>
+                    </div>
+                    <span className="text-[10px] text-slate-400 block">默认 10 篇，任意设定</span>
+                  </div>
+                </div>
+
+                {/* 批次全局总标签数上限 */}
+                <div className="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200/70 dark:border-slate-700/70 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <span className="text-xs font-semibold text-slate-800 dark:text-slate-200 block">
+                        🌐 批次全局总标签数上限 (Two-pass 聚类词典总容量)：
+                      </span>
+                      <span className="text-[10px] text-slate-400 block">
+                        大模型在 Pass 1 全局提炼时，整批文章最多归纳出的核心全局标签总数
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <input
+                        type="number"
+                        min="1"
+                        value={settings.maxGlobalTags ?? 8}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value, 10);
+                          setSettings({ ...settings, maxGlobalTags: isNaN(v) ? 1 : Math.max(1, v) });
+                        }}
+                        className="w-16 px-2 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 text-xs font-semibold text-center focus:outline-none focus:ring-1 focus:ring-blue-500"
+                      />
+                      <span className="text-[11px] text-slate-400">个</span>
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-700/50 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={settings.adaptiveGlobalTags ?? true}
+                      onChange={(e) => setSettings({ ...settings, adaptiveGlobalTags: e.target.checked })}
+                      className="rounded text-blue-600 focus:ring-0"
+                    />
+                    <div className="text-[11px] text-slate-600 dark:text-slate-300">
+                      <span className="font-semibold">允许 AI 根据提示词与正文丰度在上限内自适应调整</span>
+                      <span className="text-[10px] text-slate-400 block">
+                        开启后，若这批文章内容较集中，AI 会自适应生成更少（如 3~5 个）的高纯度标签，避免无意义凑数。
+                      </span>
+                    </div>
+                  </label>
+                </div>
               </div>
 
               <div className="p-2.5 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 text-slate-500 dark:text-slate-400 text-[11px] leading-relaxed">

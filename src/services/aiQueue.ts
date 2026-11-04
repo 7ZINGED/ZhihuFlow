@@ -13,6 +13,12 @@ export interface AIQueueState {
   tasks: AIQueueTask[];
   currentTitle?: string;
   currentArticleId?: string;
+  chunkInfo?: {
+    currentChunk: number;
+    totalChunks: number;
+    chunkSize: number;
+  };
+  synthesizedTaxonomy?: string[]; // 两阶段聚类 Pass 1 提炼出的本批次收敛全局标签库
 }
 
 const STORAGE_KEY = 'zh_ai_batch_queue_v1';

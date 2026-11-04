@@ -25,6 +25,11 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   maxTagCount: 2,
   allowModifyTags: true,
   allowModifyDescription: true,
+  batchLimitQuick: 30,
+  batchLimitCategorize: 20,
+  batchLimitDeep: 10,
+  maxGlobalTags: 8,
+  adaptiveGlobalTags: true,
 };
 
 export async function getAISettings(): Promise<AISettings> {
@@ -183,8 +188,84 @@ export interface CategorizeResult {
 
 export interface CategorizeOptions {
   existingTags?: string[];
+  batchTaxonomy?: string[]; // 两阶段聚类 Pass 1 提炼出的本批次收敛全局规范标签库
   maxTagCount?: number;
   allowModifyDescription?: boolean;
+}
+
+/**
+ * 阶段 2 (Pass 1)：针对一批文章综合自适应提炼收敛的全局核心标签词典 (Taxonomy Synthesis)
+ * 基于各文章的粗读/精读摘要，由大模型在全局视角提取规范、互斥、高聚合的标签库
+ */
+export async function synthesizeBatchTaxonomy(
+  articles: {
+    title: string;
+    aiSummary?: string;
+    aiKeyTakeaways?: string[];
+    aiCommentsInsight?: string;
+  }[],
+  options: {
+    maxGlobalTags?: number;
+    adaptiveGlobalTags?: boolean;
+    customPrompt?: string;
+  } = {}
+): Promise<string[]> {
+  if (articles.length === 0) return [];
+
+  const settings = await getAISettings();
+  const maxGlobalTags = Math.max(1, options.maxGlobalTags ?? settings.maxGlobalTags ?? 8);
+  const adaptive = options.adaptiveGlobalTags ?? settings.adaptiveGlobalTags ?? true;
+  const customPrompt = options.customPrompt ?? settings.customCategorizePrompt ?? '';
+
+  // 汇总整批文章的浓缩摘要
+  const articleBriefs = articles
+    .map((a, idx) => {
+      let summary = a.aiCommentsInsight
+        ? `${a.aiSummary || ''} (争议焦点: ${a.aiCommentsInsight})`
+        : a.aiSummary || (a.aiKeyTakeaways && a.aiKeyTakeaways.length > 0 ? a.aiKeyTakeaways.join('; ') : '无摘要');
+      if (!summary || summary === '无摘要') {
+        summary = a.title;
+      }
+      return `${idx + 1}. 《${a.title}》 - 摘要: ${summary.slice(0, 120)}`;
+    })
+    .join('\n');
+
+  const systemPrompt = `你是一位专业的个人知识库架构师与信息分类学（Taxonomy）专家。
+你的任务是根据提供的一批文章的主题与摘要，提炼出一套精炼、高度内聚且互斥的全局主题分类标签体系。
+【硬性约束】：
+1. 标签总数控制：${adaptive ? `根据这批文章的内容丰富度自适应提炼，但【严格不得超过 ${maxGlobalTags} 个总标签】` : `【严格输出最多 ${maxGlobalTags} 个总标签】`}；
+2. 规范性要求：每个标签必须是行业标准的通用主题词条（例如：前端架构、量化交易、产品心理学、认知成长、二次元、职场跃迁等），严禁使用完整句子、狭义冗余词或口语化词汇；
+3. 输出格式：仅输出一个 JSON 数组格式的标签列表，严禁代码块包裹。格式示例：["标签1", "标签2", ...]`;
+
+  const userPrompt = `【待提炼全局主题标签体系的文章批次清单（共 ${articles.length} 篇）】：
+${articleBriefs}
+
+${customPrompt ? `【用户自定义分类指导要求】：\n${customPrompt}\n` : ''}
+请为上述文章批次综合提炼出最核心的全局规范分类标签词库（总数严格限制在 1 ~ ${maxGlobalTags} 个以内）：
+["核心标签1", "核心标签2", ...]`;
+
+  try {
+    const rawJson = await callChatCompletions(
+      [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      0.2
+    );
+
+    const parsed = JSON.parse(rawJson);
+    if (Array.isArray(parsed)) {
+      const clean = parsed
+        .map((t) => String(t).trim().replace(/^#+/, ''))
+        .filter((t) => t.length > 0 && t.length <= 15)
+        .slice(0, maxGlobalTags);
+      if (clean.length > 0) return clean;
+    }
+  } catch (err) {
+    console.warn('全局标签聚类 Pass 1 提炼异常，将回退到默认高频词池:', err);
+  }
+
+  return [];
 }
 
 export async function categorizeArticleWithAI(
@@ -201,6 +282,7 @@ export async function categorizeArticleWithAI(
   const categorizeInstruction = settings.customCategorizePrompt?.trim() || DEFAULT_CATEGORIZE_PROMPT;
 
   let passedExistingTags: string[] = [];
+  let batchTaxonomy: string[] = [];
   let maxTagCount = settings.maxTagCount || 2;
   let allowModifyDescription = settings.allowModifyDescription ?? true;
 
@@ -209,6 +291,9 @@ export async function categorizeArticleWithAI(
   } else if (options && typeof options === 'object') {
     if (Array.isArray(options.existingTags)) {
       passedExistingTags = options.existingTags;
+    }
+    if (Array.isArray(options.batchTaxonomy)) {
+      batchTaxonomy = options.batchTaxonomy;
     }
     if (typeof options.maxTagCount === 'number') {
       maxTagCount = options.maxTagCount;
@@ -230,12 +315,16 @@ export async function categorizeArticleWithAI(
     new Set(passedExistingTags.filter((t) => typeof t === 'string' && t.trim()))
   ).slice(0, 30);
 
+  const hasBatchTaxonomy = batchTaxonomy.length > 0;
+
   const systemPrompt = `你是一位专业的个人知识库架构师与词条分类专家。
 ${categorizeInstruction}
 
 【硬性约束】：
 1. 标签数量控制：每篇内容【严格输出最多 ${maxTagCount} 个标签】（1 到 ${maxTagCount} 个，多余的坚决不生成）；
-2. 标签池优先复用：系统会提供现有高频标签池，请优先从中挑选已有标签进行归并与复用；
+${hasBatchTaxonomy 
+  ? `2. 【全局标签库强制对齐】：本批次已通过全局语义聚类提炼出以下规范词库，请【严格优先且仅能从中选取】最匹配本文的标签：${batchTaxonomy.join('、')}；坚决杜绝创造生僻冗余新词；` 
+  : '2. 标签池优先复用：系统会提供现有高频标签池，请优先从中挑选已有标签进行归并与复用；'}
 ${allowModifyDescription ? '3. 描述提炼：请结合正文生成 80 字以内的精简摘要描述（summary 字段）；' : '3. 描述保持：本次无需修改摘要描述；'}
 4. 收藏夹归类：结合备选收藏夹推荐最贴切归宿。`;
 
@@ -248,9 +337,7 @@ ${allowModifyDescription ? '3. 描述提炼：请结合正文生成 80 字以内
 - 现有摘要：${safeSummary}
 - 正文参考截选：${safeContent}
 
-【知识库现有高频标签池（请严格优先从中挑选最匹配的，严禁制造同义冗余新词）】：
-${cleanExistingTags.length > 0 ? cleanExistingTags.join('、') : '（当前标签库暂为空，请按行业一级标准建立初始词条）'}
-
+${hasBatchTaxonomy ? `【本批次收敛全局标签库（请严格从下列选项中挑选 1~${maxTagCount} 个）】：\n${batchTaxonomy.join('、')}\n` : `【知识库现有高频标签池（请严格优先从中挑选最匹配的，严禁制造同义冗余新词）】：\n${cleanExistingTags.length > 0 ? cleanExistingTags.join('、') : '（当前标签库暂为空，请按行业一级标准建立初始词条）'}\n`}
 【用户备选收藏夹清单】：
 ${collectionsDesc || '（暂无其他收藏夹）'}
 

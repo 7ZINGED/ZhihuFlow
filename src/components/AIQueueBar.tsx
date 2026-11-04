@@ -184,10 +184,19 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
                 }`}>
                   {getModeLabel()}
                 </span>
+                {queueState.chunkInfo && queueState.chunkInfo.totalChunks > 1 && (
+                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300 border border-blue-300/50">
+                    分批 {queueState.chunkInfo.currentChunk}/{queueState.chunkInfo.totalChunks} (每批 {queueState.chunkInfo.chunkSize} 篇)
+                  </span>
+                )}
               </div>
 
               <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                {status === 'running' && (currentTitle ? `正在处理: ${currentTitle}` : '正在准备下一篇...')}
+                {status === 'running' && (
+                  currentTitle 
+                    ? `正在处理: ${currentTitle} ${queueState.synthesizedTaxonomy?.length ? `(已收敛 ${queueState.synthesizedTaxonomy.length} 个全局标签)` : ''}`
+                    : '正在准备下一批次...'
+                )}
                 {status === 'paused' && `已完成 ${doneCount} 篇，剩余 ${pendingCount} 篇待处理，随时可点击继续`}
                 {status === 'completed' && (
                   failedCount === 0
