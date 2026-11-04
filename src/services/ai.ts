@@ -300,6 +300,7 @@ export interface DeepReadResult {
   hotComments: string[];
   readingMode: 'deep';
   isTruncated: false;
+  totalWordCount?: number;
 }
 
 export async function deepReadArticleWithAI(

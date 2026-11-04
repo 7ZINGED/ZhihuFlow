@@ -30,6 +30,7 @@ export interface PlanItem {
   toCollection: ZhihuCollection;
   status: 'pending' | 'success' | 'skipped' | 'error';
   errorMsg?: string;
+  reason?: string;
 }
 
 interface AutoOrganizeDraft {
@@ -676,7 +677,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
             {/* 开始 / 继续分析按钮 */}
             {!running && (
               <button
-                onClick={() => handleStart(isPaused)}
+                onClick={() => handleStart(Boolean(isPaused))}
                 disabled={running || sourceColIds.size === 0 || targetColIds.size === 0}
                 className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white font-medium shadow-md shadow-blue-500/20 disabled:opacity-50 active:scale-95 transition"
               >

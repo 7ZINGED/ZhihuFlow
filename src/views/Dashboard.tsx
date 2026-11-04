@@ -22,6 +22,8 @@ import {
   Tag,
   RotateCcw,
   AlertTriangle,
+  AlertCircle,
+  X,
   Download,
   Upload,
   Loader2,
@@ -387,7 +389,7 @@ export const Dashboard: React.FC = () => {
         }
       }
 
-      const res = await deepReadArticleWithAI(article, { hotComments });
+      const res = await deepReadArticleWithAI(article, hotComments);
       await db.articles.update(article.id, {
         aiSummary: res.summary,
         aiKeyTakeaways: res.keyTakeaways,
@@ -395,7 +397,7 @@ export const Dashboard: React.FC = () => {
         hotComments: res.hotComments || article.hotComments,
         aiReadingMode: 'deep',
         isTruncated: false,
-        totalWordCount: res.totalWordCount,
+        totalWordCount: res.totalWordCount || (article.fullContent || article.title).length,
         aiDeepReadAt: Date.now(),
       });
     }
