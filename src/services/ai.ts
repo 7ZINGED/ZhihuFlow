@@ -76,19 +76,43 @@ async function callChatCompletions(
     headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
   }
 
-  const response = await fetch(endpointUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      model: settings.model.trim(),
-      messages,
-      temperature,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: settings.model.trim(),
+        messages,
+        temperature,
+      }),
+    });
+  } catch (netErr: any) {
+    throw new Error(`网络连接失败（无法连通 ${endpointUrl}，请检查网络或代理）: ${netErr?.message || netErr}`);
+  }
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`AI 请求失败 [${response.status}]: ${errorText}`);
+    let friendlyMsg = errorText;
+    try {
+      const parsed = JSON.parse(errorText);
+      if (parsed?.error?.message) {
+        friendlyMsg = parsed.error.message;
+      }
+    } catch {}
+
+    // 智能提取核心原因，避免数百字符的长堆栈把 UI 撑爆
+    if (friendlyMsg.includes('connectex') || friendlyMsg.includes('dial tcp') || friendlyMsg.includes('timeout') || friendlyMsg.includes('Failed to fetch')) {
+      friendlyMsg = '网络连接超时（无法连接到上游模型服务，请检查网络/节点代理）';
+    } else if (friendlyMsg.includes('auth_unavailable')) {
+      friendlyMsg = '上游服务凭据失效或连接中断 (auth_unavailable)';
+    }
+
+    if (friendlyMsg.length > 80) {
+      friendlyMsg = friendlyMsg.slice(0, 80) + '...';
+    }
+
+    throw new Error(`AI 请求失败 [${response.status}]: ${friendlyMsg}`);
   }
 
   const json = await response.json();
