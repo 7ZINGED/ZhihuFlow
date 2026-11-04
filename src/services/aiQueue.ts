@@ -1,7 +1,7 @@
 export interface AIQueueTask {
   articleId: string;
   title: string;
-  mode: 'quick' | 'deep';
+  mode: 'quick' | 'categorize' | 'deep'; // 三阶段递进：粗读初筛 | 词条分类 | 全文精读
   status: 'pending' | 'processing' | 'done' | 'failed';
   error?: string;
   updatedAt: number;
@@ -9,7 +9,7 @@ export interface AIQueueTask {
 
 export interface AIQueueState {
   status: 'idle' | 'running' | 'paused' | 'completed';
-  mode: 'quick' | 'deep';
+  mode: 'quick' | 'categorize' | 'deep';
   tasks: AIQueueTask[];
   currentTitle?: string;
   currentArticleId?: string;

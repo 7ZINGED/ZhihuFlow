@@ -28,10 +28,11 @@ interface ArticleCardProps {
   collections: ZhihuCollection[];
   isSelected: boolean;
   isTrashView?: boolean;
-  isQueueProcessing?: boolean; // 新增：是否正在被 AI 队列处理中
+  isQueueProcessing?: boolean; // 是否正在被 AI 队列处理中
   onSelect: (selected: boolean) => void;
-  onQuickRead: () => Promise<void>; // 快速粗读 (正文3000字，不读评论)
-  onDeepRead: () => Promise<void>;  // 深度精读 (全文不限字数 + 热评Top5)
+  onQuickRead: () => Promise<void>; // 阶段1: 快速粗读初筛 (正文3000字，不打标签)
+  onCategorize: () => Promise<void>; // 阶段2: 词条分类与打标 (严格1~2个收敛标签与归属推荐)
+  onDeepRead: () => Promise<void>;  // 阶段3: 深度精读 (全文不限字数 + 热评Top5)
   onMove: (targetCollectionId: string) => Promise<void>;
   onRemove: () => Promise<void>; // 移出分拣范围 (入回收站)
   onRestore?: () => Promise<void>; // 从回收站恢复
@@ -49,6 +50,7 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   isQueueProcessing = false,
   onSelect,
   onQuickRead,
+  onCategorize,
   onDeepRead,
   onMove,
   onRemove,
@@ -58,7 +60,7 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
   onUpdateTags,
   onTagClick,
 }) => {
-  const [analyzingMode, setAnalyzingMode] = useState<'quick' | 'deep' | null>(null);
+  const [analyzingMode, setAnalyzingMode] = useState<'quick' | 'categorize' | 'deep' | null>(null);
   const [copied, setCopied] = useState(false);
   const [showMoveSelect, setShowMoveSelect] = useState(false);
   const [showRatingMenu, setShowRatingMenu] = useState(false);
@@ -79,6 +81,16 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
     setShowAIMenu(false);
     try {
       await onQuickRead();
+    } finally {
+      setAnalyzingMode(null);
+    }
+  };
+
+  const handleCategorize = async () => {
+    setAnalyzingMode('categorize');
+    setShowAIMenu(false);
+    try {
+      await onCategorize();
     } finally {
       setAnalyzingMode(null);
     }
@@ -256,16 +268,16 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
         </a>
       </h3>
 
-      {/* 标签展示与打标签功能 (MoonDigest 风格) */}
+      {/* 阶段 2: 词条分类与标签展示 (严格限制1~2个收敛标签) */}
       <div className="mt-2 flex items-center gap-1.5 flex-wrap">
         {(article.tags || []).map((t) => (
           <span
             key={t}
             onClick={() => onTagClick?.(t)}
-            className="group/tag inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-blue-50 dark:hover:bg-blue-950/60 hover:text-blue-600 dark:hover:text-blue-400 cursor-pointer transition"
+            className="group/tag inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200/50 dark:border-indigo-800/40 hover:bg-indigo-100 cursor-pointer transition font-medium"
           >
             <Tag className="w-2.5 h-2.5 opacity-60" />
-            <span>{t}</span>
+            <span>#{t}</span>
             <button
               onClick={(e) => handleRemoveTag(t, e)}
               className="opacity-0 group-hover/tag:opacity-100 hover:text-rose-500 transition ml-0.5"
@@ -275,6 +287,29 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
             </button>
           </span>
         ))}
+
+        {/* 若未分类打标，提供独立的 AI 词条分类按钮 */}
+        {(!article.tags || article.tags.length === 0) && (
+          <button
+            onClick={handleCategorize}
+            disabled={!!analyzingMode || isQueueProcessing}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-indigo-50/80 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 font-medium transition"
+            title="执行阶段2：AI 词条分类（提炼1~2个收敛标签与推荐收藏夹）"
+          >
+            <Tag className="w-2.5 h-2.5" />
+            <span>{analyzingMode === 'categorize' ? '分类中...' : 'AI 词条分类'}</span>
+          </button>
+        )}
+
+        {/* 推荐目标收藏夹指示 */}
+        {article.aiCategory && article.aiCategory !== '其他' && article.aiCategory !== article.collectionTitle && (
+          <span 
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200/50"
+            title={article.aiCategoryReason ? `推荐理由: ${article.aiCategoryReason}` : '建议移动到此收藏夹'}
+          >
+            <span>建议移入: {article.aiCategory}</span>
+          </span>
+        )}
 
         {isAddingTag ? (
           <form onSubmit={handleAddTagSubmit} className="inline-flex items-center gap-1">
@@ -295,10 +330,10 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
           <button
             onClick={() => setIsAddingTag(true)}
             className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[11px] text-slate-400 hover:text-blue-600 dark:hover:text-blue-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-            title="为文章添加标签"
+            title="手动添加自定义标签"
           >
             <Plus className="w-3 h-3" />
-            <span>标签</span>
+            <span>自定义</span>
           </button>
         )}
       </div>
@@ -393,34 +428,62 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
               {/* AI 粗读 / 深读 组合按钮 */}
               <div className="relative">
                 <div className="inline-flex rounded-lg shadow-sm">
-                  {/* 主触发按钮 */}
+                  {/* 主触发按钮：三阶段递进引导 */}
                   <button
-                    onClick={isTruncated ? handleDeepRead : handleQuickRead}
+                    onClick={
+                      isTruncated
+                        ? handleDeepRead
+                        : !article.aiSummary
+                        ? handleQuickRead
+                        : (!article.tags || article.tags.length === 0)
+                        ? handleCategorize
+                        : article.aiReadingMode !== 'deep'
+                        ? handleDeepRead
+                        : handleQuickRead
+                    }
                     disabled={!!analyzingMode || isQueueProcessing}
                     className={`flex items-center gap-1 px-2.5 py-1 rounded-l-lg font-medium text-xs transition disabled:opacity-50 ${
                       isQueueProcessing
                         ? 'bg-blue-600 text-white animate-pulse'
                         : isTruncated
                         ? 'bg-amber-500 hover:bg-amber-600 text-white shadow-sm'
+                        : analyzingMode === 'categorize'
+                        ? 'bg-indigo-600 text-white'
                         : article.aiReadingMode === 'deep'
                         ? 'bg-purple-50 dark:bg-purple-950/50 text-purple-600 dark:text-purple-400 hover:bg-purple-100'
                         : 'bg-blue-50 dark:bg-blue-950/50 text-blue-600 dark:text-blue-400 hover:bg-blue-100'
                     }`}
-                    title={isQueueProcessing ? 'AI 队列正在分析中...' : isTruncated ? '文章超 3000 字，点击执行全文深读' : '快速粗读 (仅正文3000字)'}
+                    title={
+                      isQueueProcessing
+                        ? 'AI 队列正在分析中...'
+                        : isTruncated
+                        ? '文章超 3000 字，点击执行全文深读'
+                        : !article.aiSummary
+                        ? '阶段1：快速粗读初筛 (仅正文3000字，不打标签)'
+                        : (!article.tags || article.tags.length === 0)
+                        ? '阶段2：AI 词条分类 (提取1~2个收敛标签)'
+                        : '阶段3：全文深度精读 (+读热评Top5)'
+                    }
                   >
                     <Sparkles className={`w-3.5 h-3.5 ${analyzingMode || isQueueProcessing ? 'animate-spin' : ''}`} />
                     <span>
                       {isQueueProcessing
-                        ? '队列分析中'
+                        ? '队列处理中'
                         : analyzingMode === 'deep'
                         ? '深读中...'
+                        : analyzingMode === 'categorize'
+                        ? '分类中...'
                         : analyzingMode === 'quick'
                         ? '粗读中...'
                         : isTruncated
                         ? '全文深读'
-                        : article.aiSummary
-                        ? article.aiReadingMode === 'deep' ? '重新精读' : '重读'
-                        : 'AI粗读'}
+                        : !article.aiSummary
+                        ? '1. 粗读初筛'
+                        : (!article.tags || article.tags.length === 0)
+                        ? '2. 词条分类'
+                        : article.aiReadingMode === 'deep'
+                        ? '已精读'
+                        : '3. 全文深读'}
                     </span>
                   </button>
 
@@ -428,39 +491,49 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
                   <button
                     onClick={() => setShowAIMenu(!showAIMenu)}
                     disabled={!!analyzingMode || isQueueProcessing}
-                    className={`px-1 rounded-r-lg border-l border-black/10 dark:border-white/10 transition ${
-                      isTruncated
-                        ? 'bg-amber-600 text-white hover:bg-amber-700'
-                        : article.aiReadingMode === 'deep'
-                        ? 'bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300'
-                        : 'bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300'
-                    }`}
-                    title="选择阅读模式"
+                    className="px-1 rounded-r-lg border-l border-black/10 dark:border-white/10 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 transition"
+                    title="选择三个递进处理功能"
                   >
                     <ChevronDown className="w-3 h-3" />
                   </button>
                 </div>
 
-                {/* AI 模式切换弹出菜单 */}
+                {/* AI 模式切换弹出菜单 (三阶段递进) */}
                 {showAIMenu && (
-                  <div className="absolute right-0 bottom-full mb-1 w-48 bg-white dark:bg-slate-800 shadow-xl rounded-xl border border-slate-100 dark:border-slate-700 py-1.5 z-30 animate-fade-in text-xs space-y-0.5">
+                  <div className="absolute right-0 bottom-full mb-1 w-52 bg-white dark:bg-slate-800 shadow-xl rounded-2xl border border-slate-100 dark:border-slate-700 py-1.5 z-30 animate-fade-in text-xs space-y-0.5">
+                    <div className="px-3 py-1 text-[10px] text-slate-400 font-bold uppercase tracking-wider border-b border-slate-100 dark:border-slate-700/60">
+                      三阶段递进功能
+                    </div>
+                    
                     <button
                       onClick={handleQuickRead}
-                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-blue-50 dark:hover:bg-blue-950/30 text-slate-700 dark:text-slate-300 text-left"
+                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-blue-50 dark:hover:bg-blue-950/30 text-slate-700 dark:text-slate-300 text-left transition"
                     >
                       <span className="flex items-center gap-1.5">
                         <Sparkles className="w-3.5 h-3.5 text-blue-500" />
-                        <span>AI 快速粗读</span>
+                        <span>1. 快速粗读初筛</span>
                       </span>
-                      <span className="text-[10px] text-slate-400">正文3000字</span>
+                      <span className="text-[10px] text-slate-400">去水初筛</span>
                     </button>
+
+                    <button
+                      onClick={handleCategorize}
+                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-indigo-50 dark:hover:bg-indigo-950/30 text-indigo-700 dark:text-indigo-300 text-left font-medium transition"
+                    >
+                      <span className="flex items-center gap-1.5">
+                        <Tag className="w-3.5 h-3.5 text-indigo-500" />
+                        <span>2. 词条分类打标</span>
+                      </span>
+                      <span className="text-[10px] text-indigo-500 font-semibold">限1~2标签</span>
+                    </button>
+
                     <button
                       onClick={handleDeepRead}
-                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/30 text-purple-700 dark:text-purple-300 text-left font-medium"
+                      className="w-full flex items-center justify-between px-3 py-1.5 hover:bg-purple-50 dark:hover:bg-purple-950/30 text-purple-700 dark:text-purple-300 text-left font-medium transition"
                     >
                       <span className="flex items-center gap-1.5">
                         <BookOpen className="w-3.5 h-3.5 text-purple-500" />
-                        <span>全文深度精读</span>
+                        <span>3. 全文深度精读</span>
                       </span>
                       <span className="text-[10px] text-purple-500">全文+热评</span>
                     </button>

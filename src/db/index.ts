@@ -30,15 +30,18 @@ export interface ZhihuArticleItem {
   // 标签体系 (MoonDigest 风格)
   tags?: string[];
 
-  // AI 摘读与观点分析结果 (类似 MoonDigest)
+  // AI 摘读与观点分析结果 (三阶段递进：粗读 -> 分类 -> 精读)
   aiSummary?: string;
   aiKeyTakeaways?: string[]; // 核心要点
   aiCategory?: string; // AI 推荐归类收藏夹
+  aiCategoryReason?: string; // 归类理由
   aiTriageRating?: 'keep' | 'discard' | 'review'; // 分拣评级: 值得留(keep) / 可清理(discard) / 不确定(review)
   aiTriageReason?: string; // 建议理由
   aiCommentsInsight?: string; // 评论区高赞焦点与争议洞察
   hotComments?: string[]; // 抓取到的热评/神评 Top 5
-  aiProcessedAt?: number;
+  aiProcessedAt?: number; // 阶段1: 粗读初筛完成时间
+  aiClassifiedAt?: number; // 阶段2: 词条分类与标签完成时间
+  aiDeepReadAt?: number; // 阶段3: 全文精读完成时间
 
   // 粗读与深读模式状态 (MoonDigest 风格)
   aiReadingMode?: 'quick' | 'deep'; // 'quick' 粗读 (正文3000字截断) | 'deep' 深读 (全文无限制+热评Top5)

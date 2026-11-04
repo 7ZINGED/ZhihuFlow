@@ -26,7 +26,8 @@ import {
   Upload,
   Loader2,
   Pause,
-  Play
+  Play,
+  BookOpen
 } from 'lucide-react';
 import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
@@ -48,7 +49,13 @@ import {
   moveArticleBetweenCollections, 
   removeArticleFromCollection
 } from '../services/zhihuApi';
-import { analyzeArticleWithAI, generateCollectionDescription } from '../services/ai';
+import { 
+  quickTriageArticleWithAI,
+  categorizeArticleWithAI,
+  deepReadArticleWithAI,
+  analyzeArticleWithAI, 
+  generateCollectionDescription 
+} from '../services/ai';
 import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
 interface HistoryRecord {
@@ -272,11 +279,45 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 单条 AI 分析：支持快速粗读 (quick, 3000字截断，不读评论) 或 深度精读 (deep, 全文不限字数 + 热评Top5)
-  const handleAnalyzeSingle = async (article: ZhihuArticleItem, mode: 'quick' | 'deep' = 'quick') => {
-    let hotComments: string[] | undefined = undefined;
-    if (mode === 'deep') {
-      hotComments = article.hotComments || [];
+  // 递进式 AI 处理：Stage 1 粗读初筛 / Stage 2 词条分类(限1~2标签) / Stage 3 深度精读(+热评Top5)
+  const handleAnalyzeSingle = async (
+    article: ZhihuArticleItem,
+    mode: 'quick' | 'categorize' | 'deep' = 'quick'
+  ) => {
+    if (mode === 'quick') {
+      const res = await quickTriageArticleWithAI(article, { maxChars: 3000 });
+      await db.articles.update(article.id, {
+        aiSummary: res.summary,
+        aiKeyTakeaways: res.keyTakeaways,
+        aiTriageRating: res.triageRating,
+        aiTriageReason: res.triageReason,
+        aiReadingMode: 'quick',
+        isTruncated: res.isTruncated,
+        totalWordCount: res.totalWordCount,
+        aiProcessedAt: Date.now(),
+      });
+    } else if (mode === 'categorize') {
+      // 提炼当前库中高频标签池 (Top 30)，引导 AI 优先收敛复用已有标签，杜绝标签泛滥膨胀
+      const tagCounts: Record<string, number> = {};
+      activeArticles.forEach((a) => {
+        (a.tags || []).forEach((t) => {
+          tagCounts[t] = (tagCounts[t] || 0) + 1;
+        });
+      });
+      const existingTags = Object.entries(tagCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 30)
+        .map(([t]) => t);
+
+      const res = await categorizeArticleWithAI(article, collections, { existingTags });
+      await db.articles.update(article.id, {
+        tags: res.tags, // 严格限制为 1~2 个高质量规范标签
+        aiCategory: res.recommendedCategory,
+        aiCategoryReason: res.categoryReason,
+        aiClassifiedAt: Date.now(),
+      });
+    } else if (mode === 'deep') {
+      let hotComments = article.hotComments || [];
       if (!hotComments || hotComments.length === 0) {
         try {
           hotComments = await fetchHotComments(article.contentId, article.contentType);
@@ -284,37 +325,23 @@ export const Dashboard: React.FC = () => {
           console.warn('获取热评失败:', err);
         }
       }
+
+      const res = await deepReadArticleWithAI(article, { hotComments });
+      await db.articles.update(article.id, {
+        aiSummary: res.summary,
+        aiKeyTakeaways: res.keyTakeaways,
+        aiCommentsInsight: res.commentsInsight,
+        hotComments: res.hotComments || article.hotComments,
+        aiReadingMode: 'deep',
+        isTruncated: false,
+        totalWordCount: res.totalWordCount,
+        aiDeepReadAt: Date.now(),
+      });
     }
-
-    // 调用大模型深度/粗读分析
-    const res = await analyzeArticleWithAI(
-      article,
-      collections,
-      { mode, hotComments }
-    );
-
-    // 合并现有标签与 AI 推荐标签
-    const currentTags = article.tags || [];
-    const newTags = Array.from(new Set([...currentTags, ...(res.tags || [])]));
-
-    await db.articles.update(article.id, {
-      aiSummary: res.summary,
-      aiKeyTakeaways: res.keyTakeaways,
-      aiCategory: res.recommendedCategory,
-      aiTriageRating: res.triageRating,
-      aiTriageReason: res.triageReason,
-      aiCommentsInsight: res.commentsInsight,
-      hotComments: res.hotComments || article.hotComments,
-      aiReadingMode: res.readingMode,
-      isTruncated: res.isTruncated,
-      totalWordCount: res.totalWordCount,
-      tags: newTags,
-      aiProcessedAt: Date.now(),
-    });
   };
 
   // 核心队列执行器：逐篇处理任务，支持实时暂停、取消与异常容错
-  const runQueueLoop = async (tasksList: AIQueueTask[], mode: 'quick' | 'deep') => {
+  const runQueueLoop = async (tasksList: AIQueueTask[], mode: 'quick' | 'categorize' | 'deep') => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     queueStatusRef.current = 'running';
@@ -387,10 +414,10 @@ export const Dashboard: React.FC = () => {
   };
 
   // 批量 AI 分拣：加入持久化任务队列并启动 (支持随时暂停与刷新断点恢复)
-  const handleBatchAI = async (mode: 'quick' | 'deep' = 'quick') => {
+  const handleBatchAI = async (mode: 'quick' | 'categorize' | 'deep' = 'quick') => {
     const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
     if (targets.length === 0) {
-      alert('请先勾选需要 AI 摘读分拣的文章！');
+      alert('请先勾选需要 AI 处理的文章！');
       return;
     }
 
@@ -422,7 +449,8 @@ export const Dashboard: React.FC = () => {
     setQueueState(nextState);
     saveQueueToStorage(nextState);
     setSelectedIds(new Set()); // 清空勾选以便用户继续操作其他内容
-    showToast(`🚀 已将 ${newTasks.length} 篇内容加入 AI 分拣队列并启动！`);
+    const modeLabel = mode === 'categorize' ? '词条分类' : mode === 'deep' ? '深度精读' : '快速粗读';
+    showToast(`🚀 已将 ${newTasks.length} 篇内容加入 AI [${modeLabel}] 队列并启动！`);
 
     // 启动处理队列
     runQueueLoop(mergedTasks, mode);
@@ -728,7 +756,7 @@ export const Dashboard: React.FC = () => {
                 </div>
 
                 <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100/70 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
-                  {queueState.mode === 'deep' ? '深读' : '粗读'}
+                  {queueState.mode === 'deep' ? '精读' : queueState.mode === 'categorize' ? '分类' : '粗读'}
                 </span>
               </div>
 
@@ -1117,21 +1145,31 @@ export const Dashboard: React.FC = () => {
                   <button
                     onClick={() => handleBatchAI('quick')}
                     disabled={loading}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 font-medium transition"
-                    title="正文限前3000字，不读评论，快速粗读"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 font-medium transition text-xs"
+                    title="【阶段1·初筛】正文限前3000字，评级分拣(留/删/疑)，不打标签"
                   >
                     <Sparkles className="w-3.5 h-3.5" />
-                    AI 批量粗读
+                    1. 批量粗读初筛
+                  </button>
+
+                  <button
+                    onClick={() => handleBatchAI('categorize')}
+                    disabled={loading}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 font-medium transition text-xs"
+                    title="【阶段2·分类】归档推荐与规范打标，优先收敛已有标签池，严格限制1~2个标签"
+                  >
+                    <Tag className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
+                    2. 批量词条分类
                   </button>
 
                   <button
                     onClick={() => handleBatchAI('deep')}
                     disabled={loading}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 font-medium transition"
-                    title="正文全文不限字数，抓取知乎高赞热评Top 5深入精读"
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 font-medium transition text-xs"
+                    title="【阶段3·精读】正文全文不限字数深度解析，抓取知乎高赞热评Top 5深入排坑"
                   >
-                    <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
-                    AI 批量深读
+                    <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
+                    3. 批量全文精读
                   </button>
 
                   <select
@@ -1219,6 +1257,7 @@ export const Dashboard: React.FC = () => {
                     setSelectedIds(next);
                   }}
                   onQuickRead={() => handleAnalyzeSingle(article, 'quick')}
+                  onCategorize={() => handleAnalyzeSingle(article, 'categorize')}
                   onDeepRead={() => handleAnalyzeSingle(article, 'deep')}
                   onMove={async (targetColId) => {
                     await moveArticleBetweenCollections(

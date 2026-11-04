@@ -39,7 +39,17 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
   const pendingCount = tasks.filter((t) => t.status === 'pending' || t.status === 'processing').length;
   const percent = total > 0 ? Math.round(((doneCount + failedCount) / total) * 100) : 0;
 
-  const isDeep = mode === 'deep';
+  const getModeLabel = () => {
+    if (mode === 'categorize') return '🏷️ 2. 词条分类 (限1~2标签)';
+    if (mode === 'deep') return '✨ 3. 深度精读 (+热评Top5)';
+    return '⚡ 1. 快速粗读初筛';
+  };
+
+  const getPillLabel = () => {
+    if (mode === 'categorize') return '分类';
+    if (mode === 'deep') return '精读';
+    return '粗读';
+  };
 
   // 最小化胶囊状态 (避免遮挡视线，保持极简)
   if (isMinimized) {
@@ -57,8 +67,8 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
             <span className="font-bold text-slate-800 dark:text-slate-200">
               {doneCount}/{total} ({percent}%)
             </span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400">
-              {isDeep ? '精读' : '粗读'}
+            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 font-medium">
+              {getPillLabel()}
             </span>
           </div>
 
@@ -127,18 +137,20 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
                   {status === 'completed' && '🎉 AI 分拣队列已全部完成'}
                 </span>
                 <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
-                  isDeep 
+                  mode === 'deep'
                     ? 'bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 border border-indigo-200/50 dark:border-indigo-800/50'
+                    : mode === 'categorize'
+                    ? 'bg-amber-50 dark:bg-amber-950/60 text-amber-600 dark:text-amber-400 border border-amber-200/50 dark:border-amber-800/50'
                     : 'bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 border border-blue-200/50 dark:border-blue-800/50'
                 }`}>
-                  {isDeep ? '✨ 深度精读 (+热评Top5)' : '⚡ 快速粗读 (3000字截断)'}
+                  {getModeLabel()}
                 </span>
               </div>
 
               <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                {status === 'running' && (currentTitle ? `正在分析: ${currentTitle}` : '正在准备下一篇...')}
+                {status === 'running' && (currentTitle ? `正在处理: ${currentTitle}` : '正在准备下一篇...')}
                 {status === 'paused' && `已完成 ${doneCount} 篇，剩余 ${pendingCount} 篇待处理，随时可点击继续`}
-                {status === 'completed' && `本次任务共 ${total} 篇内容全部完成 AI 分析分类与标签提炼`}
+                {status === 'completed' && `本次任务共 ${total} 篇内容全部完成处理`}
               </p>
             </div>
           </div>
