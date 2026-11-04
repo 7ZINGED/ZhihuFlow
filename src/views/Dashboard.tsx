@@ -408,6 +408,7 @@ export const Dashboard: React.FC = () => {
     queueStatusRef.current = 'running';
 
     const tasks = [...tasksList];
+    let consecutiveErrors = 0;
 
     for (let i = 0; i < tasks.length; i++) {
       // 循环开始前检查是否已暂停或清空
@@ -439,11 +440,19 @@ export const Dashboard: React.FC = () => {
         } else {
           await handleAnalyzeSingle(article, task.mode);
           task.status = 'done';
+          consecutiveErrors = 0; // 成功则重置连续错误计数
         }
       } catch (err: any) {
         console.error('AI 队列处理任务失败:', err);
         task.status = 'failed';
         task.error = err?.message || '分析失败';
+        consecutiveErrors++;
+
+        // 熔断保护：连续 3 篇出现接口异常，自动暂停队列，防止 200+ 篇全部白白失败
+        if (consecutiveErrors >= 3) {
+          queueStatusRef.current = 'paused';
+          showToast(`⚠️ 接口连续调用异常 [${task.error}]，队列已自动暂停保护！`);
+        }
       }
 
       task.updatedAt = Date.now();
@@ -468,6 +477,11 @@ export const Dashboard: React.FC = () => {
 
       if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
         break;
+      }
+
+      // 请求间微小安全间隔 (300ms)，避免触发大模型端点的并发/频控拦截 (HTTP 429)
+      if (i < tasks.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 300));
       }
     }
 
@@ -553,6 +567,31 @@ export const Dashboard: React.FC = () => {
     clearQueueStorage();
     setQueueState({ status: 'idle', mode: 'quick', tasks: [] });
     showToast('已清空 AI 分拣队列');
+  };
+
+  // 一键重试当前队列中所有失败项
+  const handleRetryFailed = () => {
+    const failedTasks = queueState.tasks.filter((t) => t.status === 'failed');
+    if (failedTasks.length === 0) return;
+
+    const updatedTasks = queueState.tasks.map((t) =>
+      t.status === 'failed' ? { ...t, status: 'pending' as const, error: undefined } : t
+    );
+
+    queueStatusRef.current = 'running';
+    const nextState: AIQueueState = {
+      ...queueState,
+      status: 'running',
+      tasks: updatedTasks,
+      currentTitle: failedTasks[0]?.title,
+      currentArticleId: failedTasks[0]?.articleId,
+    };
+
+    setQueueState(nextState);
+    saveQueueToStorage(nextState);
+    showToast(`🔄 正在重新尝试处理 ${failedTasks.length} 篇失败项...`);
+
+    runQueueLoop(updatedTasks, queueState.mode);
   };
 
   // 批量移动 (记录历史用于撤销)
@@ -808,11 +847,21 @@ export const Dashboard: React.FC = () => {
                     <Loader2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 animate-spin shrink-0" />
                   ) : queueState.status === 'paused' ? (
                     <Pause className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  ) : queueState.tasks.some((t) => t.status === 'failed') ? (
+                    <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
                   ) : (
                     <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                   )}
                   <span className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate">
-                    {queueState.status === 'running' ? 'AI 读取分拣中' : queueState.status === 'paused' ? '队列已暂停' : '分拣完成'}
+                    {queueState.status === 'running' 
+                      ? 'AI 读取分拣中' 
+                      : queueState.status === 'paused' 
+                      ? '队列已暂停' 
+                      : queueState.tasks.some((t) => t.status === 'failed')
+                      ? queueState.tasks.every((t) => t.status === 'failed')
+                        ? '全部执行失败'
+                        : '完成(含异常)'
+                      : '分拣完成'}
                   </span>
                 </div>
 
@@ -827,7 +876,11 @@ export const Dashboard: React.FC = () => {
                   <div
                     className={`h-full rounded-full transition-all duration-300 ${
                       queueState.status === 'completed'
-                        ? 'bg-emerald-500'
+                        ? queueState.tasks.some((t) => t.status === 'failed')
+                          ? queueState.tasks.every((t) => t.status === 'failed')
+                            ? 'bg-rose-500'
+                            : 'bg-amber-500'
+                          : 'bg-emerald-500'
                         : queueState.status === 'paused'
                         ? 'bg-amber-500'
                         : 'bg-blue-600 animate-pulse'
@@ -844,6 +897,9 @@ export const Dashboard: React.FC = () => {
                 <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400">
                   <span>
                     已完成 {queueState.tasks.filter((t) => t.status === 'done').length} / {queueState.tasks.length} 篇
+                    {queueState.tasks.some((t) => t.status === 'failed') && (
+                      <span className="text-rose-500 ml-1">· {queueState.tasks.filter((t) => t.status === 'failed').length} 篇异常</span>
+                    )}
                   </span>
                   <span>
                     {Math.round(
@@ -894,12 +950,31 @@ export const Dashboard: React.FC = () => {
                 )}
 
                 {queueState.status === 'completed' && (
-                  <button
-                    onClick={handleClearQueue}
-                    className="flex-1 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold"
-                  >
-                    ✓ 全部完成 (点击关闭)
-                  </button>
+                  queueState.tasks.some((t) => t.status === 'failed') ? (
+                    <div className="flex items-center gap-1 w-full">
+                      <button
+                        onClick={handleRetryFailed}
+                        className="flex-1 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold flex items-center justify-center gap-1 shadow-sm transition"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        <span>重试失败项 ({queueState.tasks.filter((t) => t.status === 'failed').length})</span>
+                      </button>
+                      <button
+                        onClick={handleClearQueue}
+                        className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
+                        title="关闭任务"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={handleClearQueue}
+                      className="flex-1 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold"
+                    >
+                      ✓ 全部完成 (点击关闭)
+                    </button>
+                  )
                 )}
               </div>
             </div>
@@ -1394,12 +1469,14 @@ export const Dashboard: React.FC = () => {
         </div>
       )}
 
-      {/* AI 任务队列持久化控制面板 (支持暂停、继续、清空，刷新自动断点保护) */}
+      {/* AI 任务队列持久化控制面板 (支持暂停、继续、清空、重试失败项，刷新自动断点保护) */}
       <AIQueueBar
         queueState={queueState}
         onPause={handlePauseQueue}
         onResume={handleResumeQueue}
         onClear={handleClearQueue}
+        onRetryFailed={handleRetryFailed}
+        onOpenSettings={() => setIsSettingsOpen(true)}
       />
 
       <SettingsModal isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />

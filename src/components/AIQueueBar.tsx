@@ -6,10 +6,13 @@ import {
   X, 
   CheckCircle2, 
   AlertCircle,
+  AlertTriangle,
   Loader2,
   Trash2,
   Minimize2,
-  Maximize2
+  Maximize2,
+  RotateCcw,
+  Settings
 } from 'lucide-react';
 import { type AIQueueState } from '../services/aiQueue';
 
@@ -18,6 +21,8 @@ interface AIQueueBarProps {
   onPause: () => void;
   onResume: () => void;
   onClear: () => void;
+  onRetryFailed?: () => void;
+  onOpenSettings?: () => void;
 }
 
 export const AIQueueBar: React.FC<AIQueueBarProps> = ({
@@ -25,6 +30,8 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
   onPause,
   onResume,
   onClear,
+  onRetryFailed,
+  onOpenSettings,
 }) => {
   const [isMinimized, setIsMinimized] = useState<boolean>(false);
   const { status, mode, tasks, currentTitle } = queueState;
@@ -35,9 +42,11 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
 
   const total = tasks.length;
   const doneCount = tasks.filter((t) => t.status === 'done').length;
-  const failedCount = tasks.filter((t) => t.status === 'failed').length;
+  const failedTasks = tasks.filter((t) => t.status === 'failed');
+  const failedCount = failedTasks.length;
   const pendingCount = tasks.filter((t) => t.status === 'pending' || t.status === 'processing').length;
   const percent = total > 0 ? Math.round(((doneCount + failedCount) / total) * 100) : 0;
+  const firstError = failedTasks.find((t) => t.error)?.error;
 
   const getModeLabel = () => {
     if (mode === 'categorize') return '🏷️ 2. 词条分类 (限1~2标签)';
@@ -61,6 +70,10 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
               <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin" />
             ) : status === 'paused' ? (
               <Pause className="w-3.5 h-3.5 text-amber-500" />
+            ) : failedCount > 0 && doneCount === 0 ? (
+              <AlertCircle className="w-3.5 h-3.5 text-rose-500" />
+            ) : failedCount > 0 ? (
+              <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
             ) : (
               <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
             )}
@@ -94,6 +107,16 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
             </button>
           )}
 
+          {failedCount > 0 && onRetryFailed && (
+            <button
+              onClick={onRetryFailed}
+              className="p-1 rounded-lg text-blue-600 hover:bg-blue-50 transition"
+              title={`重试 ${failedCount} 篇失败项`}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
+
           <button
             onClick={() => setIsMinimized(false)}
             className="p-1 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
@@ -124,17 +147,33 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
               </div>
             )}
             {status === 'completed' && (
-              <div className="w-8 h-8 rounded-2xl bg-emerald-50 dark:bg-emerald-950/80 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
-                <CheckCircle2 className="w-4 h-4" />
-              </div>
+              failedCount === 0 ? (
+                <div className="w-8 h-8 rounded-2xl bg-emerald-50 dark:bg-emerald-950/80 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+                  <CheckCircle2 className="w-4 h-4" />
+                </div>
+              ) : doneCount === 0 ? (
+                <div className="w-8 h-8 rounded-2xl bg-rose-50 dark:bg-rose-950/80 flex items-center justify-center text-rose-600 dark:text-rose-400 shrink-0">
+                  <AlertCircle className="w-4 h-4" />
+                </div>
+              ) : (
+                <div className="w-8 h-8 rounded-2xl bg-amber-50 dark:bg-amber-950/80 flex items-center justify-center text-amber-600 dark:text-amber-400 shrink-0">
+                  <AlertTriangle className="w-4 h-4" />
+                </div>
+              )
             )}
 
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <span className="font-bold text-xs text-slate-800 dark:text-slate-100">
                   {status === 'running' && 'AI 分拣队列运行中'}
-                  {status === 'paused' && 'AI 分拣队列已暂停 (刷新已保护)'}
-                  {status === 'completed' && '🎉 AI 分拣队列已全部完成'}
+                  {status === 'paused' && 'AI 分拣队列已暂停 (断点已保护)'}
+                  {status === 'completed' && (
+                    failedCount === 0
+                      ? '🎉 AI 分拣队列已全部完成'
+                      : doneCount === 0
+                      ? `❌ AI 分拣队列执行失败 (${failedCount} 篇异常)`
+                      : `⚠️ AI 分拣完成 (含 ${failedCount} 篇异常)`
+                  )}
                 </span>
                 <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${
                   mode === 'deep'
@@ -150,7 +189,11 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
               <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate mt-0.5">
                 {status === 'running' && (currentTitle ? `正在处理: ${currentTitle}` : '正在准备下一篇...')}
                 {status === 'paused' && `已完成 ${doneCount} 篇，剩余 ${pendingCount} 篇待处理，随时可点击继续`}
-                {status === 'completed' && `本次任务共 ${total} 篇内容全部完成处理`}
+                {status === 'completed' && (
+                  failedCount === 0
+                    ? `本次任务共 ${total} 篇内容全部完成处理`
+                    : `失败原因: ${firstError || '大模型请求异常，请检查接口配置或网络'}`
+                )}
               </p>
             </div>
           </div>
@@ -190,6 +233,28 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
               </>
             )}
 
+            {failedCount > 0 && onRetryFailed && (
+              <button
+                onClick={onRetryFailed}
+                className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-95 text-xs font-semibold shadow-md shadow-blue-600/20 transition"
+                title="一键重新尝试处理所有异常项"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>重试失败项 ({failedCount})</span>
+              </button>
+            )}
+
+            {failedCount > 0 && onOpenSettings && (
+              <button
+                onClick={onOpenSettings}
+                className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-medium transition"
+                title="检查 AI 接口、模型与 API Key 设置"
+              >
+                <Settings className="w-3.5 h-3.5" />
+                <span>检查设置</span>
+              </button>
+            )}
+
             {status === 'completed' && (
               <button
                 onClick={onClear}
@@ -217,7 +282,11 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
             <div
               className={`h-full transition-all duration-300 rounded-full ${
                 status === 'completed'
-                  ? 'bg-emerald-500'
+                  ? failedCount === 0
+                    ? 'bg-emerald-500'
+                    : doneCount === 0
+                    ? 'bg-rose-500'
+                    : 'bg-amber-500'
                   : status === 'paused'
                   ? 'bg-amber-500'
                   : 'bg-gradient-to-r from-blue-600 to-indigo-500 animate-pulse'
@@ -229,10 +298,18 @@ export const AIQueueBar: React.FC<AIQueueBarProps> = ({
           <div className="flex items-center justify-between text-[10px] text-slate-400 dark:text-slate-500">
             <span>
               已完成 {doneCount} / {total} 篇 ({percent}%)
-              {failedCount > 0 && <span className="text-rose-500 ml-1">· {failedCount} 篇异常</span>}
+              {failedCount > 0 && <span className="text-rose-500 font-semibold ml-1">· {failedCount} 篇异常</span>}
             </span>
             <span>
-              {status === 'running' ? '分拣进行中...' : status === 'paused' ? '队列等待中' : '分拣完成'}
+              {status === 'running' 
+                ? '分拣进行中...' 
+                : status === 'paused' 
+                ? '队列已暂停' 
+                : failedCount === 0 
+                ? '全部成功完成' 
+                : doneCount === 0 
+                ? '全部执行失败' 
+                : '已完成(含异常)'}
             </span>
           </div>
         </div>

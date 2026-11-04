@@ -53,10 +53,17 @@ async function callChatCompletions(
 ): Promise<string> {
   const settings = await getAISettings();
   if (!settings.endpoint || !settings.model) {
-    throw new Error('未配置 AI 接口或模型名称，请前往设置面板配置！');
+    throw new Error('未配置 AI 接口或模型名称，请前往右上角「设置」面板配置！');
   }
 
   const endpointUrl = normalizeEndpoint(settings.endpoint);
+
+  // 若为商业远程模型服务且未填写 API Key，直接友好拦截提醒，避免盲目发送401
+  const isLocal = endpointUrl.includes('127.0.0.1') || endpointUrl.includes('localhost') || endpointUrl.includes(':11434');
+  if (!isLocal && !settings.apiKey?.trim()) {
+    throw new Error('当前大模型接口需要 API Key，请先前往右上角「设置」面板填写 API Key！');
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   };
@@ -232,10 +239,14 @@ ${categorizeInstruction}
 ${allowModifyDescription ? '3. 描述提炼：请结合正文生成 80 字以内的精简摘要描述（summary 字段）；' : '3. 描述保持：本次无需修改摘要描述；'}
 4. 收藏夹归类：结合备选收藏夹推荐最贴切归宿。`;
 
+  const safeTitle = article.title || '知乎内容';
+  const safeSummary = article.aiSummary || '（暂无粗读摘要）';
+  const safeContent = (article.fullContent || safeTitle || '').slice(0, 1500);
+
   const userPrompt = `【待分类的知乎内容】
-- 标题：${article.title}
-- 现有摘要：${article.aiSummary || '（暂无粗读摘要）'}
-- 正文参考截选：${(article.fullContent || article.title).slice(0, 1500)}
+- 标题：${safeTitle}
+- 现有摘要：${safeSummary}
+- 正文参考截选：${safeContent}
 
 【知识库现有高频标签池（请严格优先从中挑选最匹配的，严禁制造同义冗余新词）】：
 ${cleanExistingTags.length > 0 ? cleanExistingTags.join('、') : '（当前标签库暂为空，请按行业一级标准建立初始词条）'}
