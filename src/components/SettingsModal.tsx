@@ -39,6 +39,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     apiKey: '',
     customTriagePrompt: DEFAULT_TRIAGE_PROMPT,
     customCategorizePrompt: DEFAULT_CATEGORIZE_PROMPT,
+    maxTagCount: 2,
+    allowModifyTags: true,
+    allowModifyDescription: true,
   });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -54,6 +57,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
           ...s,
           customTriagePrompt: s.customTriagePrompt || DEFAULT_TRIAGE_PROMPT,
           customCategorizePrompt: s.customCategorizePrompt || DEFAULT_CATEGORIZE_PROMPT,
+          maxTagCount: s.maxTagCount || 2,
+          allowModifyTags: s.allowModifyTags ?? true,
+          allowModifyDescription: s.allowModifyDescription ?? true,
         });
       });
       setMsg('');
@@ -351,6 +357,81 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                   placeholder="输入你的自定义词条分类与打标签提示词..."
                   className="w-full p-2.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs font-mono leading-relaxed focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
                 />
+              </div>
+
+              {/* 3. AI 词条打标与描述控制选项 (Tag数目与描述开关) */}
+              <div className="p-3.5 rounded-2xl border border-indigo-200/80 dark:border-indigo-900/60 bg-indigo-50/40 dark:bg-indigo-950/20 space-y-3">
+                <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-100 text-xs">
+                  <Sliders className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                  <span>AI 打标数量与描述开关选项</span>
+                </div>
+
+                {/* 标签数目限制 */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-slate-700 dark:text-slate-300">
+                      AI 生成 Tag 数量限制 (每篇文章最大标签数)：
+                    </label>
+                    <span className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+                      最多 {settings.maxTagCount || 2} 个
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {[1, 2, 3, 4].map((num) => (
+                      <button
+                        key={num}
+                        type="button"
+                        onClick={() => setSettings({ ...settings, maxTagCount: num })}
+                        className={`flex-1 py-1.5 rounded-xl text-xs font-medium transition ${
+                          (settings.maxTagCount || 2) === num
+                            ? 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/30'
+                            : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:border-indigo-300'
+                        }`}
+                      >
+                        {num} 个标签 {num === 2 ? '(推荐)' : ''}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500">
+                    严格限定 AI 提炼的标签上限，数值越低标签收敛度越高，彻底杜绝标签泛滥膨胀。
+                  </p>
+                </div>
+
+                {/* 开关选项 1：是否允许 AI 修改/覆盖已有标签 */}
+                <label className="flex items-start gap-2.5 p-2 rounded-xl bg-white/70 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={settings.allowModifyTags ?? true}
+                    onChange={(e) => setSettings({ ...settings, allowModifyTags: e.target.checked })}
+                    className="mt-0.5 rounded text-indigo-600 focus:ring-0"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 block">
+                      重新分类时允许 AI 调整并覆盖已有 Tag
+                    </span>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-normal">
+                      开启后，点击重新分类将直接根据最新 Prompt 提示词与数量限制更新替换旧标签；关闭则保留已有标签，仅对未打标内容处理。
+                    </p>
+                  </div>
+                </label>
+
+                {/* 开关选项 2：是否允许 AI 生成/修改描述 */}
+                <label className="flex items-start gap-2.5 p-2 rounded-xl bg-white/70 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={settings.allowModifyDescription ?? true}
+                    onChange={(e) => setSettings({ ...settings, allowModifyDescription: e.target.checked })}
+                    className="mt-0.5 rounded text-indigo-600 focus:ring-0"
+                  />
+                  <div className="space-y-0.5">
+                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 block">
+                      AI 词条分类时允许提炼并更新文章描述 (Summary)
+                    </span>
+                    <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-normal">
+                      开启后，AI 在分类打标时会根据正文提炼 80 字以内的精简摘要描述；关闭则分类仅处理标签和归档收藏夹，不修改正文摘要描述。
+                    </p>
+                  </div>
+                </label>
               </div>
 
               <div className="p-2.5 rounded-xl bg-blue-50/50 dark:bg-blue-950/20 text-slate-500 dark:text-slate-400 text-[11px] leading-relaxed">

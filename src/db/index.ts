@@ -64,6 +64,9 @@ export interface AISettings {
   promptTemplate?: string;
   customTriagePrompt?: string;     // 分拣筛选自定义提示词 (值得留/可清理/不确定评级标准)
   customCategorizePrompt?: string; // 词条分类与标签提取自定义提示词
+  maxTagCount?: number;            // AI 生成标签数量上限 (1 ~ 5，默认 2)
+  allowModifyTags?: boolean;        // 重新分类时允许覆盖修改已有标签 (默认 true)
+  allowModifyDescription?: boolean; // AI 分类时允许生成/修改文章摘要描述 (默认 true)
 }
 
 export class ZhihuDigestDatabase extends Dexie {

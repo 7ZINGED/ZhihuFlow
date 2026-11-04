@@ -18,7 +18,8 @@ import {
   RotateCcw,
   ChevronDown,
   MessageSquareQuote,
-  BookOpen
+  BookOpen,
+  RefreshCw
 } from 'lucide-react';
 import { type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { copyMarkdownToClipboard, downloadMarkdownFile, sendToObsidian } from '../services/exporter';
@@ -288,16 +289,26 @@ export const ArticleCard: React.FC<ArticleCardProps> = ({
           </span>
         ))}
 
-        {/* 若未分类打标，提供独立的 AI 词条分类按钮 */}
-        {(!article.tags || article.tags.length === 0) && (
+        {/* 若未分类打标，提供独立的 AI 词条分类按钮；已有标签时悬停显示重算按钮 */}
+        {(!article.tags || article.tags.length === 0) ? (
           <button
             onClick={handleCategorize}
             disabled={!!analyzingMode || isQueueProcessing}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] bg-indigo-50/80 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 font-medium transition"
-            title="执行阶段2：AI 词条分类（提炼1~2个收敛标签与推荐收藏夹）"
+            title="执行阶段2：AI 词条分类（按最新设置提炼规范标签与推荐收藏夹）"
           >
             <Tag className="w-2.5 h-2.5" />
             <span>{analyzingMode === 'categorize' ? '分类中...' : 'AI 词条分类'}</span>
+          </button>
+        ) : (
+          <button
+            onClick={handleCategorize}
+            disabled={!!analyzingMode || isQueueProcessing}
+            className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 transition"
+            title="按最新标签数量限制重新执行 AI 词条分类并调整 Tag 数目"
+          >
+            <RefreshCw className={`w-2.5 h-2.5 ${analyzingMode === 'categorize' ? 'animate-spin' : ''}`} />
+            <span>{analyzingMode === 'categorize' ? '重算中...' : '重算标签'}</span>
           </button>
         )}
 

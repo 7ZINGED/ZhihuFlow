@@ -22,11 +22,17 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   apiKey: '',
   customTriagePrompt: DEFAULT_TRIAGE_PROMPT,
   customCategorizePrompt: DEFAULT_CATEGORIZE_PROMPT,
+  maxTagCount: 2,
+  allowModifyTags: true,
+  allowModifyDescription: true,
 };
 
 export async function getAISettings(): Promise<AISettings> {
   const result = await chrome.storage.local.get(['ai_settings']);
-  return result.ai_settings || DEFAULT_AI_SETTINGS;
+  return {
+    ...DEFAULT_AI_SETTINGS,
+    ...(result.ai_settings || {}),
+  };
 }
 
 export async function saveAISettings(settings: AISettings): Promise<void> {
@@ -162,9 +168,16 @@ ${contentToSend}
 // 阶段 2：词条分类与标签提取（严格限制1~2个收敛标签，优先复用标签池）
 // -------------------------------------------------------------
 export interface CategorizeResult {
-  tags: string[]; // 严格 1~2 个
+  tags: string[]; // 严格 1 ~ maxTagCount 个规范标签
   recommendedCategory: string;
   categorizeReason?: string;
+  summary?: string; // AI 生成/提炼的简明描述 (受“描述开关”控制)
+}
+
+export interface CategorizeOptions {
+  existingTags?: string[];
+  maxTagCount?: number;
+  allowModifyDescription?: boolean;
 }
 
 export async function categorizeArticleWithAI(
@@ -175,27 +188,56 @@ export async function categorizeArticleWithAI(
     collectionTitle?: string;
   },
   targetCollections: { id: string; title: string; description?: string }[],
-  existingTags: string[] = []
+  options?: string[] | CategorizeOptions
 ): Promise<CategorizeResult> {
   const settings = await getAISettings();
   const categorizeInstruction = settings.customCategorizePrompt?.trim() || DEFAULT_CATEGORIZE_PROMPT;
+
+  let passedExistingTags: string[] = [];
+  let maxTagCount = settings.maxTagCount || 2;
+  let allowModifyDescription = settings.allowModifyDescription ?? true;
+
+  if (Array.isArray(options)) {
+    passedExistingTags = options;
+  } else if (options && typeof options === 'object') {
+    if (Array.isArray(options.existingTags)) {
+      passedExistingTags = options.existingTags;
+    }
+    if (typeof options.maxTagCount === 'number') {
+      maxTagCount = options.maxTagCount;
+    }
+    if (typeof options.allowModifyDescription === 'boolean') {
+      allowModifyDescription = options.allowModifyDescription;
+    }
+  }
+
+  // 保证 maxTagCount 合法 (1 ~ 5)
+  maxTagCount = Math.max(1, Math.min(5, maxTagCount));
 
   const collectionsDesc = targetCollections
     .map((c) => `- 「${c.title}」: ${c.description || '无具体说明'}`)
     .join('\n');
 
   // 取出现有高频标签池前 30 个供 AI 优先匹配
-  const cleanExistingTags = Array.from(new Set(existingTags.filter((t) => t && t.trim()))).slice(0, 30);
+  const cleanExistingTags = Array.from(
+    new Set(passedExistingTags.filter((t) => typeof t === 'string' && t.trim()))
+  ).slice(0, 30);
 
   const systemPrompt = `你是一位专业的个人知识库架构师与词条分类专家。
-${categorizeInstruction}`;
+${categorizeInstruction}
+
+【硬性约束】：
+1. 标签数量控制：每篇内容【严格输出最多 ${maxTagCount} 个标签】（1 到 ${maxTagCount} 个，多余的坚决不生成）；
+2. 标签池优先复用：系统会提供现有高频标签池，请优先从中挑选已有标签进行归并与复用；
+${allowModifyDescription ? '3. 描述提炼：请结合正文生成 80 字以内的精简摘要描述（summary 字段）；' : '3. 描述保持：本次无需修改摘要描述；'}
+4. 收藏夹归类：结合备选收藏夹推荐最贴切归宿。`;
 
   const userPrompt = `【待分类的知乎内容】
 - 标题：${article.title}
 - 现有摘要：${article.aiSummary || '（暂无粗读摘要）'}
-- 正文参考截选：${(article.fullContent || article.title).slice(0, 1200)}
+- 正文参考截选：${(article.fullContent || article.title).slice(0, 1500)}
 
-【知识库现有高频标签池（请严格优先从中挑选 1~2 个最匹配的，严禁制造同义冗余新词）】：
+【知识库现有高频标签池（请严格优先从中挑选最匹配的，严禁制造同义冗余新词）】：
 ${cleanExistingTags.length > 0 ? cleanExistingTags.join('、') : '（当前标签库暂为空，请按行业一级标准建立初始词条）'}
 
 【用户备选收藏夹清单】：
@@ -203,9 +245,9 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
 
 请以 JSON 格式输出词条分类结果（严禁代码块包裹）：
 {
-  "tags": ["核心标签1", "核心标签2（若无必要可只填1个，最多不可超过2个）"],
+  "tags": [${Array.from({ length: maxTagCount }, (_, i) => `"核心标签${i + 1}"`).join(', ')}],
   "recommendedCategory": "备选收藏夹列表中最匹配的完整标题（若均不合适填'其他'）",
-  "categorizeReason": "20字以内的归类推荐理由"
+  "categorizeReason": "20字以内的归类推荐理由"${allowModifyDescription ? ',\n  "summary": "80字以内的文章精炼主旨描述"' : ''}
 }`;
 
   const rawJson = await callChatCompletions([
@@ -216,16 +258,17 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
   try {
     const parsed = JSON.parse(rawJson);
     const rawTags: string[] = Array.isArray(parsed.tags) ? parsed.tags : [];
-    // 严格限制为 1 ~ 2 个规范标签，过滤无效空值与符号
+    // 严格限制为 1 ~ maxTagCount 个规范标签，过滤无效空值与符号
     const cleanTags = rawTags
       .map((t) => String(t).trim().replace(/^#+/, ''))
       .filter((t) => t.length > 0 && t.length <= 15)
-      .slice(0, 2);
+      .slice(0, maxTagCount);
 
     return {
       tags: cleanTags.length > 0 ? cleanTags : ['未归类'],
       recommendedCategory: parsed.recommendedCategory || '默认',
       categorizeReason: parsed.categorizeReason || 'AI已完成分类匹配',
+      summary: allowModifyDescription ? parsed.summary?.trim() : undefined,
     };
   } catch (err) {
     return {

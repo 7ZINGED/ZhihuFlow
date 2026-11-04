@@ -54,7 +54,8 @@ import {
   categorizeArticleWithAI,
   deepReadArticleWithAI,
   analyzeArticleWithAI, 
-  generateCollectionDescription 
+  generateCollectionDescription,
+  getAISettings 
 } from '../services/ai';
 import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
@@ -265,9 +266,15 @@ export const Dashboard: React.FC = () => {
     return true;
   });
 
-  // 提取当前所有存在的标签 (用于顶部快速筛选)
-  const availableTags = Array.from(
-    new Set(activeArticles.flatMap((a) => a.tags || []))
+  // 提取当前所有存在的标签并按热度降序排序 (用于顶部快速筛选与收敛管理)
+  const tagFrequency: Record<string, number> = {};
+  activeArticles.forEach((a) => {
+    (a.tags || []).forEach((t) => {
+      tagFrequency[t] = (tagFrequency[t] || 0) + 1;
+    });
+  });
+  const availableTags = Object.keys(tagFrequency).sort(
+    (a, b) => tagFrequency[b] - tagFrequency[a]
   );
 
   // 全选/反选
@@ -279,7 +286,38 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 递进式 AI 处理：Stage 1 粗读初筛 / Stage 2 词条分类(限1~2标签) / Stage 3 深度精读(+热评Top5)
+  // 从所有文章中移除特定标签
+  const handleRemoveGlobalTag = async (tagToRemove: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!confirm(`确定在所有文章中删除标签「#${tagToRemove}」吗？`)) return;
+    let count = 0;
+    for (const a of activeArticles) {
+      if (a.tags?.includes(tagToRemove)) {
+        await db.articles.update(a.id, {
+          tags: a.tags.filter((t) => t !== tagToRemove),
+        });
+        count++;
+      }
+    }
+    if (selectedTag === tagToRemove) setSelectedTag('');
+    showToast(`已从 ${count} 篇文章中移除标签「#${tagToRemove}」`);
+  };
+
+  // 一键清空所有文章的历史旧标签 (彻底解决“总tag数太多”的历史积压问题)
+  const handleClearAllTags = async () => {
+    if (!confirm(`⚠️ 确定要清空全部 ${activeArticles.length} 篇文章的历史旧标签吗？\n\n清空后可彻底解决历史标签膨胀，随后可通过「2. 批量词条分类」按照最新限制重新规范提炼高质量标签！`)) return;
+    let count = 0;
+    for (const a of activeArticles) {
+      if (a.tags && a.tags.length > 0) {
+        await db.articles.update(a.id, { tags: [] });
+        count++;
+      }
+    }
+    setSelectedTag('');
+    showToast(`🧹 已清空 ${count} 篇文章的历史旧标签，现在可以重新规范打标！`);
+  };
+
+  // 递进式 AI 处理：Stage 1 粗读初筛 / Stage 2 词条分类(受设置控制) / Stage 3 深度精读(+热评Top5)
   const handleAnalyzeSingle = async (
     article: ZhihuArticleItem,
     mode: 'quick' | 'categorize' | 'deep' = 'quick'
@@ -297,6 +335,14 @@ export const Dashboard: React.FC = () => {
         aiProcessedAt: Date.now(),
       });
     } else if (mode === 'categorize') {
+      const settings = await getAISettings();
+      const maxTagCount = settings.maxTagCount || 2;
+      const allowModifyTags = settings.allowModifyTags ?? true;
+      const allowModifyDescription = settings.allowModifyDescription ?? true;
+
+      // 如果用户在设置中关闭了“允许AI覆盖已有标签”，且文章已有标签，则保留既有标签
+      const shouldKeepExistingTags = !allowModifyTags && article.tags && article.tags.length > 0;
+
       // 提炼当前库中高频标签池 (Top 30)，引导 AI 优先收敛复用已有标签，杜绝标签泛滥膨胀
       const tagCounts: Record<string, number> = {};
       activeArticles.forEach((a) => {
@@ -309,13 +355,28 @@ export const Dashboard: React.FC = () => {
         .slice(0, 30)
         .map(([t]) => t);
 
-      const res = await categorizeArticleWithAI(article, collections, { existingTags });
-      await db.articles.update(article.id, {
-        tags: res.tags, // 严格限制为 1~2 个高质量规范标签
-        aiCategory: res.recommendedCategory,
-        aiCategoryReason: res.categoryReason,
-        aiClassifiedAt: Date.now(),
+      const res = await categorizeArticleWithAI(article, collections, { 
+        existingTags,
+        maxTagCount,
+        allowModifyDescription,
       });
+
+      const updateData: Partial<ZhihuArticleItem> = {
+        aiCategory: res.recommendedCategory,
+        aiCategoryReason: res.categorizeReason,
+        aiClassifiedAt: Date.now(),
+      };
+
+      if (!shouldKeepExistingTags) {
+        // 完全按照最新 AI 词条打标调整标签数 (严格限制为 1 ~ maxTagCount 个)
+        updateData.tags = res.tags.slice(0, maxTagCount);
+      }
+
+      if (allowModifyDescription && res.summary) {
+        updateData.aiSummary = res.summary;
+      }
+
+      await db.articles.update(article.id, updateData);
     } else if (mode === 'deep') {
       let hotComments = article.hotComments || [];
       if (!hotComments || hotComments.length === 0) {
@@ -1067,39 +1128,60 @@ export const Dashboard: React.FC = () => {
           </div>
         </div>
 
-        {/* 标签过滤栏 (当有标签存在时显示) */}
+        {/* 标签过滤与全局收敛管理栏 (当有标签存在时显示) */}
         {availableTags.length > 0 && !isTrashView && (
-          <div className="px-6 py-1.5 bg-slate-50/70 dark:bg-slate-900/20 border-b border-slate-100 dark:border-slate-800 flex items-center gap-2 overflow-x-auto text-xs">
-            <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1 shrink-0">
-              <Tag className="w-3 h-3" /> 标签筛选:
-            </span>
-            <button
-              onClick={() => setSelectedTag('')}
-              className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 ${
-                !selectedTag
-                  ? 'bg-blue-600 text-white'
-                  : 'bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300/60'
-              }`}
-            >
-              全部标签
-            </button>
-            {availableTags.map((tag) => {
-              const count = activeArticles.filter((a) => a.tags?.includes(tag)).length;
-              return (
-                <button
-                  key={tag}
-                  onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
-                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 flex items-center gap-1 ${
-                    selectedTag === tag
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 hover:bg-blue-50 hover:text-blue-600'
-                  }`}
-                >
-                  <span>#{tag}</span>
-                  <span className="opacity-70 text-[10px]">({count})</span>
-                </button>
-              );
-            })}
+          <div className="px-6 py-2 bg-slate-50/80 dark:bg-slate-900/40 border-b border-slate-200/60 dark:border-slate-800 flex items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 min-w-0 pr-2">
+              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1 shrink-0">
+                <Tag className="w-3 h-3 text-indigo-500" /> 标签筛选 ({availableTags.length}个):
+              </span>
+              <button
+                onClick={() => setSelectedTag('')}
+                className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 ${
+                  !selectedTag
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300/60'
+                }`}
+              >
+                全部
+              </button>
+              {availableTags.map((tag) => {
+                const count = tagFrequency[tag] || 0;
+                return (
+                  <div
+                    key={tag}
+                    onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
+                    className={`group/topTag px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 flex items-center gap-1 cursor-pointer select-none ${
+                      selectedTag === tag
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'bg-white dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700 hover:border-indigo-300 hover:text-indigo-600'
+                    }`}
+                  >
+                    <span>#{tag}</span>
+                    <span className="opacity-70 text-[10px]">({count})</span>
+                    <button
+                      onClick={(e) => handleRemoveGlobalTag(tag, e)}
+                      className="opacity-0 group-hover/topTag:opacity-100 hover:text-rose-500 transition ml-0.5"
+                      title="从所有文章中移除此标签"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* 右侧全局标签清理按钮 */}
+            <div className="shrink-0 flex items-center gap-1.5">
+              <button
+                onClick={handleClearAllTags}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/70 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 hover:bg-rose-100 transition text-[11px] font-medium"
+                title="清空当前所有文章的历史标签，彻底解决标签膨胀，以便重新规范分类"
+              >
+                <Trash2 className="w-3 h-3" />
+                <span>清空全部旧标签</span>
+              </button>
+            </div>
           </div>
         )}
 
