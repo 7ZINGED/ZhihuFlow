@@ -100,52 +100,59 @@ export async function scrapeCollectionsFromActiveTab(): Promise<ZhihuCollection[
 }
 
 /**
- * 获取当前登录用户的收藏夹列表 (双模驱动：DOM 页面提取优先，API 回退)
+ * 获取当前登录用户的收藏夹列表 (双模驱动：官方API全量分页优先，DOM 页面提取回退)
  */
 export async function fetchUserCollectionsList(): Promise<ZhihuCollection[]> {
-  // 1. 优先从打开的知乎标签页直接读取（最精准，包含条目数）
+  // 1. 优先使用官方 API 全量分页获取（最完整、包含准确条目数）
+  try {
+    const headers = await getZhihuHeaders();
+    const meRes = await fetch('https://www.zhihu.com/api/v4/me', { headers });
+    if (meRes.ok) {
+      const meData = await meRes.json();
+      const urlToken = meData.url_token || meData.id;
+
+      const collections: ZhihuCollection[] = [];
+      let nextUrl: string | null = `https://www.zhihu.com/api/v4/members/${urlToken}/collections?offset=0&limit=20`;
+
+      while (nextUrl) {
+        const res = await fetch(nextUrl, { headers });
+        if (!res.ok) break;
+        const data = await res.json();
+        if (Array.isArray(data.data)) {
+          for (const item of data.data) {
+            const count = item.item_count ?? item.items_count ?? item.itemCount ?? item.total_count ?? 0;
+            collections.push({
+              id: String(item.id),
+              title: item.title,
+              itemCount: count,
+              description: item.description || '',
+              updatedTime: item.updated_time ? item.updated_time * 1000 : Date.now(),
+            });
+          }
+        }
+        nextUrl = data.paging?.is_end ? null : data.paging?.next;
+      }
+
+      if (collections.length > 0) {
+        return collections;
+      }
+    }
+  } catch (apiErr) {
+    console.warn('[ZhihuFlow] API 获取收藏夹列表异常，尝试从标签页提取回退...', apiErr);
+  }
+
+  // 2. 回退方案：从当前已打开的知乎标签页 DOM 提取
   try {
     const list = await scrapeCollectionsFromActiveTab();
     if (list.length > 0) {
-      console.log('[ZhihuFlow] 成功从知乎页面直接获取收藏夹列表:', list);
+      console.log('[ZhihuFlow] 成功从知乎页面回退获取收藏夹列表:', list);
       return list;
     }
   } catch (err) {
-    console.warn('[ZhihuFlow] 标签页 DOM 提取未命中，尝试 API 获取...', err);
+    console.warn('[ZhihuFlow] 标签页 DOM 提取亦未命中', err);
   }
 
-  // 2. API 请求获取
-  const headers = await getZhihuHeaders();
-  const meRes = await fetch('https://www.zhihu.com/api/v4/me', { headers });
-  if (!meRes.ok) {
-    throw new Error('未检测到知乎登录态，请先在浏览器中登录知乎！');
-  }
-  const meData = await meRes.json();
-  const urlToken = meData.url_token || meData.id;
-
-  const collections: ZhihuCollection[] = [];
-  let nextUrl: string | null = `https://www.zhihu.com/api/v4/members/${urlToken}/collections?offset=0&limit=20`;
-
-  while (nextUrl) {
-    const res = await fetch(nextUrl, { headers });
-    if (!res.ok) break;
-    const data = await res.json();
-    if (Array.isArray(data.data)) {
-      for (const item of data.data) {
-        const count = item.item_count ?? item.items_count ?? item.itemCount ?? item.total_count ?? 0;
-        collections.push({
-          id: String(item.id),
-          title: item.title,
-          itemCount: count,
-          description: item.description || '',
-          updatedTime: item.updated_time ? item.updated_time * 1000 : Date.now(),
-        });
-      }
-    }
-    nextUrl = data.paging?.is_end ? null : data.paging?.next;
-  }
-
-  return collections;
+  return [];
 }
 
 /**
@@ -290,8 +297,19 @@ export async function moveArticleBetweenCollections(
     }
   );
   if (!addRes.ok) {
-    const err = await addRes.text();
-    throw new Error(`移动添加至目标收藏夹失败: ${err}`);
+    const errText = await addRes.text();
+    let isAlreadyFavorited = false;
+    try {
+      const errJson = JSON.parse(errText);
+      // 知乎错误码 106: "您已经收藏过该内容" (说明目标收藏夹中本来就有此条目，添加阶段视为已满足)
+      if (errJson?.error?.code === 106 || errJson?.error?.message?.includes('已经收藏过')) {
+        isAlreadyFavorited = true;
+      }
+    } catch (_) {}
+
+    if (!isAlreadyFavorited) {
+      throw new Error(`移动添加至目标收藏夹失败: ${errText}`);
+    }
   }
 
   const rmRes = await fetch(

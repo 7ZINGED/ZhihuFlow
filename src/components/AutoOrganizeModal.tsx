@@ -105,21 +105,49 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
   
   // 草稿状态
   const [draft, setDraft] = useState<AutoOrganizeDraft | null>(null);
+  const [colArticleCounts, setColArticleCounts] = useState<Record<string, number>>({});
 
   const isPausedRef = useRef<boolean>(false);
 
+  // 实时统计各收藏夹在本地的实际文章数
   useEffect(() => {
     if (isOpen) {
+      import('../db').then(async ({ db }) => {
+        const counts: Record<string, number> = {};
+        for (const c of collections) {
+          counts[c.id] = await db.articles.where('collectionId').equals(c.id).count();
+        }
+        setColArticleCounts(counts);
+      });
+    }
+  }, [isOpen, collections]);
+
+  useEffect(() => {
+    if (isOpen) {
+      const validColIds = new Set(collections.map((c) => c.id));
       const savedDraft = loadDraftFromStorage();
       if (savedDraft && savedDraft.plans && savedDraft.plans.length > 0) {
-        setDraft(savedDraft);
+        // 修剪草稿：过滤掉已经在知乎远端物理删除的收藏夹 ID 与无效方案
+        const prunedSourceIds = (savedDraft.sourceColIds || []).filter((id) => validColIds.has(id));
+        const prunedTargetIds = (savedDraft.targetColIds || []).filter((id) => validColIds.has(id));
+        const prunedPlans = savedDraft.plans.filter((p) => validColIds.has(p.article.collectionId));
+
+        const updatedDraft: AutoOrganizeDraft = {
+          ...savedDraft,
+          sourceColIds: prunedSourceIds.length > 0 ? prunedSourceIds : (collections[0] ? [collections[0].id] : []),
+          targetColIds: prunedTargetIds.length > 0 ? prunedTargetIds : collections.map((c) => c.id),
+          plans: prunedPlans,
+        };
+        setDraft(updatedDraft);
+        saveDraftToStorage(updatedDraft);
+
         // 如果当前没有正在分析的方案，载入草稿方案便于用户查看
         if (planList.length === 0) {
-          const sourceIds = savedDraft.sourceColIds?.length > 0 ? savedDraft.sourceColIds : Array.from(sourceColIds);
+          const sourceIds = updatedDraft.sourceColIds.length > 0 ? updatedDraft.sourceColIds : Array.from(sourceColIds);
           import('../db').then(({ db }) => {
             db.articles.where('collectionId').anyOf(sourceIds).toArray().then((dbArticles) => {
               const articleMap = new Map(dbArticles.map((a) => [a.id, a]));
-              const calibratedPlans = savedDraft.plans.map((p) => {
+              const calibratedPlans = updatedDraft.plans.map((p) => {
                 const liveArt = articleMap.get(p.article.id) || p.article;
                 if (liveArt.aiCategory && liveArt.aiCategory !== '其他') {
                   const target = collections.find(
@@ -140,13 +168,9 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
               setPlanList(calibratedPlans);
             });
           });
-          if (savedDraft.sourceColIds && savedDraft.sourceColIds.length > 0) {
-            setSourceColIds(new Set(savedDraft.sourceColIds));
-          }
-          setIsDryRun(savedDraft.isDryRun);
-          if (savedDraft.targetColIds && savedDraft.targetColIds.length > 0) {
-            setTargetColIds(new Set(savedDraft.targetColIds));
-          }
+          setSourceColIds(new Set(updatedDraft.sourceColIds));
+          setIsDryRun(updatedDraft.isDryRun);
+          setTargetColIds(new Set(updatedDraft.targetColIds));
         }
       } else if (planList.length === 0) {
         // 无历史草稿时，自动从数据库中加载已有 aiCategory 的文章作为现成方案！
@@ -400,7 +424,19 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           item.article.collectionId,
           item.toCollection.id
         );
-        await db.articles.delete(item.article.id);
+        
+        // 核心保护：完整保留文章的阅读记录、标签、AI 摘要并迁移到新收藏夹
+        const oldId = item.article.id;
+        const newId = `${item.toCollection.id}_${item.article.contentId}`;
+        const updatedArticle: ZhihuArticleItem = {
+          ...item.article,
+          id: newId,
+          collectionId: item.toCollection.id,
+          collectionTitle: item.toCollection.title,
+        };
+        await db.articles.delete(oldId);
+        await db.articles.put(updatedArticle);
+
         item.status = 'success';
       } catch (err: any) {
         item.status = 'error';
@@ -588,7 +624,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                     className="rounded text-blue-600 focus:ring-0"
                   />
                   <span>{c.title}</span>
-                  <span className="text-[10px] opacity-70">({c.itemCount || 0}篇)</span>
+                  <span className="text-[10px] opacity-70">({colArticleCounts[c.id] !== undefined && colArticleCounts[c.id] > 0 ? colArticleCounts[c.id] : (c.itemCount || 0)}篇)</span>
                 </label>
               );
             })}

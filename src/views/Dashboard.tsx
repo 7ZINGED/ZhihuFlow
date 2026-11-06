@@ -180,6 +180,10 @@ export const Dashboard: React.FC = () => {
     setSyncProgress('正在同步知乎收藏夹列表...');
     try {
       const list = await fetchUserCollectionsList();
+      if (!list || list.length === 0) {
+        showToast('⚠️ 未能从知乎获取到收藏夹列表，请确认是否已在浏览器中登录知乎');
+        return;
+      }
       
       // 1. 获取本地既有收藏夹列表，找出远端已被物理删除的失效收藏夹
       const localCols = await db.collections.toArray();
@@ -188,7 +192,7 @@ export const Dashboard: React.FC = () => {
 
       if (deletedCols.length > 0) {
         const deletedIds = deletedCols.map((c) => c.id);
-        // 从本地数据库清理已被删除的收藏夹
+        // 从本地数据库清理已被删除的收藏夹元数据
         await db.collections.bulkDelete(deletedIds);
 
         // 如果当前高亮查看的收藏夹恰好被删除，安全回退到“全部”
@@ -196,17 +200,31 @@ export const Dashboard: React.FC = () => {
           setSelectedCollectionId('all');
         }
 
-        // 同步清理已删除收藏夹下的文章数据，避免悬空无主条目
+        // 绝不物理删除文章！用户的阅读记录、标签、金句是宝贵资产，
+        // 将原属于被删收藏夹的文章标记为移入回收站保护起来，避免悬空
         for (const delId of deletedIds) {
-          await db.articles.where('collectionId').equals(delId).delete();
+          const orphanArticles = await db.articles.where('collectionId').equals(delId).toArray();
+          for (const art of orphanArticles) {
+            await db.articles.update(art.id, {
+              collectionTitle: '（已解散收藏夹）',
+              inTrash: true,
+              trashedAt: Date.now(),
+            });
+          }
         }
       }
 
       // 2. 将远端最新的有效收藏夹列表写入本地
+      for (const col of list) {
+        const localCount = await db.articles.where('collectionId').equals(col.id).count();
+        if (localCount > 0 && (!col.itemCount || col.itemCount === 0)) {
+          col.itemCount = localCount;
+        }
+      }
       await db.collections.bulkPut(list);
 
       if (deletedCols.length > 0) {
-        showToast(`✅ 收藏夹目录已同步！已自动清理 ${deletedCols.length} 个在知乎端被删除的收藏夹。`);
+        showToast(`✅ 收藏夹目录已同步！已自动移除 ${deletedCols.length} 个知乎端已注销的收藏夹，其文章已移入回收站保护。`);
       } else {
         showToast(`✅ 收藏夹目录已与知乎最新状态同步！`);
       }
