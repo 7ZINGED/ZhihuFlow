@@ -204,7 +204,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
     setProgressText('正在读取已选收藏夹的文章清单...');
 
     try {
-      const { db } = await import('../db');
+      const { db, safeUpsertArticles } = await import('../db');
       const { fetchCollectionContents } = await import('../services/zhihuApi');
 
       let allSourceArticles: ZhihuArticleItem[] = [];
@@ -217,7 +217,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
         if (colArticles.length === 0) {
           setProgressText(`正在拉取「${col.title}」的内容...`);
           colArticles = await fetchCollectionContents(colId, col.title);
-          await db.articles.bulkPut(colArticles);
+          await safeUpsertArticles(colArticles);
         }
         allSourceArticles.push(...colArticles);
       }

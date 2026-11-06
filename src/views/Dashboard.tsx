@@ -29,9 +29,10 @@ import {
   Loader2,
   Pause,
   Play,
-  BookOpen
+  BookOpen,
+  Clock
 } from 'lucide-react';
-import { db, type ZhihuArticleItem, type ZhihuCollection } from '../db';
+import { db, safeUpsertArticles, type ZhihuArticleItem, type ZhihuCollection } from '../db';
 import { ArticleCard } from '../components/ArticleCard';
 import { SettingsModal } from '../components/SettingsModal';
 import { DescriptionModal } from '../components/DescriptionModal';
@@ -76,7 +77,7 @@ export const Dashboard: React.FC = () => {
   const [selectedCollectionId, setSelectedCollectionId] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTag, setSelectedTag] = useState<string>('');
-  const [filterRating, setFilterRating] = useState<'all' | 'keep' | 'discard' | 'review' | 'invalid'>('all');
+  const [filterRating, setFilterRating] = useState<'all' | 'untriaged' | 'keep' | 'discard' | 'review' | 'uncategorized' | 'invalid'>('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [syncProgress, setSyncProgress] = useState<string>('');
@@ -189,7 +190,7 @@ export const Dashboard: React.FC = () => {
     }
   };
 
-  // 同步抓取选中收藏夹中的内容
+  // 同步抓取选中收藏夹中的内容 (增量安全合并，完整保留本地AI分析与用户标记状态)
   const handleFetchArticles = async (collectionId: string) => {
     const col = collections.find((c) => c.id === collectionId);
     if (!col) return;
@@ -200,10 +201,11 @@ export const Dashboard: React.FC = () => {
       const items = await fetchCollectionContents(collectionId, col.title, (count) => {
         setSyncProgress(`已抓取 ${count} 条内容...`);
       });
-      await db.articles.bulkPut(items);
+      await safeUpsertArticles(items);
       
       const actualCount = await db.articles.where('collectionId').equals(collectionId).count();
       await db.collections.update(collectionId, { itemCount: actualCount });
+      showToast(`✅ 成功同步「${col.title}」最新内容，已完整保留已有粗读与标签数据！`);
     } catch (err: any) {
       alert(`读取收藏夹失败: ${err.message}`);
     } finally {
@@ -220,7 +222,7 @@ export const Dashboard: React.FC = () => {
       let colArticles = await db.articles.where('collectionId').equals(col.id).toArray();
       if (colArticles.length === 0) {
         colArticles = await fetchCollectionContents(col.id, col.title);
-        await db.articles.bulkPut(colArticles);
+        await safeUpsertArticles(colArticles);
       }
 
       if (colArticles.length === 0) {
@@ -248,6 +250,12 @@ export const Dashboard: React.FC = () => {
 
   const filteredArticles = currentPool.filter((item) => {
     if (!isTrashView && selectedCollectionId !== 'all' && item.collectionId !== selectedCollectionId) {
+      return false;
+    }
+    if (filterRating === 'untriaged' && (item.aiTriageRating || item.isDeletedOrInvalid)) {
+      return false;
+    }
+    if (filterRating === 'uncategorized' && ((item.tags && item.tags.length > 0) || item.isDeletedOrInvalid)) {
       return false;
     }
     if (filterRating === 'invalid' && !item.isDeletedOrInvalid) {
@@ -658,8 +666,75 @@ export const Dashboard: React.FC = () => {
       return;
     }
 
+    const settings = await getAISettings();
+    let targetsToProcess = targets;
+
+    // 智能去重与跳过已处理项，防止重复消耗 Token 与时间
+    if (mode === 'quick') {
+      const alreadyTriaged = targets.filter((a) => a.aiTriageRating);
+      if (alreadyTriaged.length > 0 && alreadyTriaged.length < targets.length) {
+        const shouldSkip = confirm(
+          `选中的 ${targets.length} 篇中有 ${alreadyTriaged.length} 篇已完成过快速粗读。\n\n` +
+          `点击【确定】跳过已读内容，仅处理剩余 ${targets.length - alreadyTriaged.length} 篇未读文章；\n` +
+          `点击【取消】对选中的全部 ${targets.length} 篇重新粗读。`
+        );
+        if (shouldSkip) {
+          targetsToProcess = targets.filter((a) => !a.aiTriageRating);
+        }
+      } else if (alreadyTriaged.length === targets.length && targets.length > 3) {
+        if (!confirm(`选中的 ${targets.length} 篇文章均已完成过快速粗读，确认要全部重新粗读吗？`)) {
+          return;
+        }
+      }
+    } else if (mode === 'categorize') {
+      const alreadyTagged = targets.filter((a) => a.tags && a.tags.length > 0);
+      const allowModifyTags = settings.allowModifyTags ?? true;
+
+      if (!allowModifyTags && alreadyTagged.length > 0) {
+        targetsToProcess = targets.filter((a) => !a.tags || a.tags.length === 0);
+        if (targetsToProcess.length === 0) {
+          alert(`选中的 ${targets.length} 篇文章均已有标签，且设置中关闭了“允许覆盖已有标签”。如需重新分类，请在右上角设置中开启该选项！`);
+          return;
+        }
+        showToast(`🏷️ 已按设置自动跳过 ${alreadyTagged.length} 篇已有标签文章，推进剩余 ${targetsToProcess.length} 篇！`);
+      } else if (alreadyTagged.length > 0 && alreadyTagged.length < targets.length) {
+        const shouldSkip = confirm(
+          `选中的 ${targets.length} 篇中有 ${alreadyTagged.length} 篇已有分类标签。\n\n` +
+          `点击【确定】跳过已有标签内容，仅对剩余 ${targets.length - alreadyTagged.length} 篇未打标文章分类；\n` +
+          `点击【取消】对选中的全部 ${targets.length} 篇重新分类。`
+        );
+        if (shouldSkip) {
+          targetsToProcess = targets.filter((a) => !a.tags || a.tags.length === 0);
+        }
+      } else if (alreadyTagged.length === targets.length && targets.length > 3) {
+        if (!confirm(`选中的 ${targets.length} 篇文章均已有分类标签，确认要全部重新分类打标吗？`)) {
+          return;
+        }
+      }
+    } else if (mode === 'deep') {
+      const alreadyDeep = targets.filter((a) => a.aiDeepReadAt);
+      if (alreadyDeep.length > 0 && alreadyDeep.length < targets.length) {
+        const shouldSkip = confirm(
+          `选中的 ${targets.length} 篇中有 ${alreadyDeep.length} 篇已完成过全文精读。\n\n` +
+          `点击【确定】跳过已精读文章，仅对剩余 ${targets.length - alreadyDeep.length} 篇进行精读；\n` +
+          `点击【取消】对选中的全部 ${targets.length} 篇重新精读。`
+        );
+        if (shouldSkip) {
+          targetsToProcess = targets.filter((a) => !a.aiDeepReadAt);
+        }
+      } else if (alreadyDeep.length === targets.length && targets.length > 3) {
+        if (!confirm(`选中的 ${targets.length} 篇文章均已完成过全文精读，确认要全部重新精读吗？`)) {
+          return;
+        }
+      }
+    }
+
+    if (targetsToProcess.length === 0) {
+      return;
+    }
+
     // 构建新任务列表
-    const newTasks: AIQueueTask[] = targets.map((item) => ({
+    const newTasks: AIQueueTask[] = targetsToProcess.map((item) => ({
       articleId: item.id,
       title: item.title,
       mode,
@@ -675,7 +750,6 @@ export const Dashboard: React.FC = () => {
 
     const mergedTasks = [...previousUnfinished, ...newTasks];
 
-    const settings = await getAISettings();
     let chunkSize = 20;
     if (mode === 'quick') chunkSize = settings.batchLimitQuick || 30;
     else if (mode === 'categorize') chunkSize = settings.batchLimitCategorize || 20;
@@ -1333,8 +1407,8 @@ export const Dashboard: React.FC = () => {
             />
           </div>
 
-          {/* 状态筛选药丸标签 (全部 / 值得留 / 可清理 / 不确定 / 已失效) */}
-          <div className="flex items-center gap-1.5 bg-slate-100/80 dark:bg-slate-900/80 p-1 rounded-xl text-xs">
+          {/* 状态筛选药丸标签 (全部 / 待粗读 / 值得留 / 可清理 / 不确定 / 未打标 / 已失效) */}
+          <div className="flex items-center gap-1.5 bg-slate-100/80 dark:bg-slate-900/80 p-1 rounded-xl text-xs flex-wrap">
             <button
               onClick={() => setFilterRating('all')}
               className={`px-2.5 py-1 rounded-lg font-medium transition ${
@@ -1344,6 +1418,18 @@ export const Dashboard: React.FC = () => {
               }`}
             >
               全部 ({currentPool.length})
+            </button>
+            <button
+              onClick={() => setFilterRating('untriaged')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
+                filterRating === 'untriaged'
+                  ? 'bg-blue-600 text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-blue-600'
+              }`}
+              title="尚未经过 AI 快速粗读评级的内容"
+            >
+              <Clock className="w-3 h-3" />
+              待粗读 ({currentPool.filter((a) => !a.aiTriageRating && !a.isDeletedOrInvalid).length})
             </button>
             <button
               onClick={() => setFilterRating('keep')}
@@ -1371,6 +1457,18 @@ export const Dashboard: React.FC = () => {
             >
               <HelpCircle className="w-3 h-3" />
               不确定 ({currentPool.filter((a) => a.aiTriageRating === 'review').length})
+            </button>
+            <button
+              onClick={() => setFilterRating('uncategorized')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
+                filterRating === 'uncategorized'
+                  ? 'bg-indigo-600 text-white shadow-sm'
+                  : 'text-slate-500 dark:text-slate-400 hover:text-indigo-600'
+              }`}
+              title="尚未打上 AI 词条分类标签的内容"
+            >
+              <Tag className="w-3 h-3" />
+              未打标 ({currentPool.filter((a) => (!a.tags || a.tags.length === 0) && !a.isDeletedOrInvalid).length})
             </button>
             <button
               onClick={() => setFilterRating('invalid')}

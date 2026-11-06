@@ -92,3 +92,55 @@ export class ZhihuDigestDatabase extends Dexie {
 }
 
 export const db = new ZhihuDigestDatabase();
+
+/**
+ * 增量安全合并写入文章条目 (Safe Upsert)
+ * 从知乎拉取最新信息（点赞数、评论数、正文等），绝不覆盖本地已有分析产物
+ * 完整保留：tags, aiSummary, aiKeyTakeaways, aiTriageRating, aiTriageReason,
+ * aiCategory, aiCategoryReason, aiCommentsInsight, hotComments,
+ * aiProcessedAt, aiClassifiedAt, aiDeepReadAt, aiReadingMode,
+ * inTrash, trashedAt, markedForDelete 等本地字段
+ */
+export async function safeUpsertArticles(newItems: ZhihuArticleItem[]): Promise<void> {
+  if (!newItems || newItems.length === 0) return;
+
+  const ids = newItems.map((item) => item.id);
+  const existingList = await db.articles.where('id').anyOf(ids).toArray();
+  const existingMap = new Map(existingList.map((a) => [a.id, a]));
+
+  const contentIds = newItems.map((item) => item.contentId).filter(Boolean);
+  const existingByContentList = await db.articles.where('contentId').anyOf(contentIds).toArray();
+  const existingByContentMap = new Map(existingByContentList.map((a) => [a.contentId, a]));
+
+  const mergedItems: ZhihuArticleItem[] = newItems.map((newItem) => {
+    const existing = existingMap.get(newItem.id) || existingByContentMap.get(newItem.contentId);
+    if (!existing) return newItem;
+
+    return {
+      ...newItem,
+      // 保护本地 AI 分析与用户标记结果
+      tags: existing.tags && existing.tags.length > 0 ? existing.tags : newItem.tags,
+      aiSummary: existing.aiSummary || newItem.aiSummary,
+      aiKeyTakeaways: existing.aiKeyTakeaways || newItem.aiKeyTakeaways,
+      aiCategory: existing.aiCategory || newItem.aiCategory,
+      aiCategoryReason: existing.aiCategoryReason || newItem.aiCategoryReason,
+      aiTriageRating: existing.aiTriageRating || newItem.aiTriageRating,
+      aiTriageReason: existing.aiTriageReason || newItem.aiTriageReason,
+      aiCommentsInsight: existing.aiCommentsInsight || newItem.aiCommentsInsight,
+      hotComments: existing.hotComments || newItem.hotComments,
+      aiProcessedAt: existing.aiProcessedAt || newItem.aiProcessedAt,
+      aiClassifiedAt: existing.aiClassifiedAt || newItem.aiClassifiedAt,
+      aiDeepReadAt: existing.aiDeepReadAt || newItem.aiDeepReadAt,
+      aiReadingMode: existing.aiReadingMode || newItem.aiReadingMode,
+      isTruncated: existing.isTruncated ?? newItem.isTruncated,
+      totalWordCount: existing.totalWordCount ?? newItem.totalWordCount,
+      inTrash: existing.inTrash ?? newItem.inTrash,
+      trashedAt: existing.trashedAt ?? newItem.trashedAt,
+      selected: existing.selected ?? newItem.selected,
+      markedForDelete: existing.markedForDelete ?? newItem.markedForDelete,
+    };
+  });
+
+  await db.articles.bulkPut(mergedItems);
+}
+
