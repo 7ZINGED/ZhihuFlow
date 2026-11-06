@@ -401,6 +401,185 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
   }
 }
 
+export interface BatchCategorizeItem {
+  id: string;
+  tags: string[];
+  recommendedCategory: string;
+  categorizeReason?: string;
+  summary?: string;
+}
+
+/**
+ * 阶段 2 (Pass 2)：整批单次批量打标映射 (Batch One-Shot Categorization)
+ * 将当前子批次（如 20 篇）打包在单次请求中，由 AI 在全局收敛的标签词库下，一次性返回整批文章的标签归属与推荐收藏夹
+ */
+export async function batchCategorizeArticlesWithAI(
+  articles: {
+    id: string;
+    title: string;
+    fullContent?: string;
+    aiSummary?: string;
+    aiKeyTakeaways?: string[];
+    aiCommentsInsight?: string;
+    collectionTitle?: string;
+  }[],
+  targetCollections: { id: string; title: string; description?: string }[],
+  options: {
+    batchTaxonomy?: string[];
+    maxTagCount?: number;
+    allowModifyDescription?: boolean;
+    existingTags?: string[];
+  } = {}
+): Promise<Map<string, BatchCategorizeItem>> {
+  const resultMap = new Map<string, BatchCategorizeItem>();
+  if (articles.length === 0) return resultMap;
+
+  // 若只有 1 篇，直接调用单篇打标接口
+  if (articles.length === 1) {
+    const single = articles[0];
+    const res = await categorizeArticleWithAI(single, targetCollections, {
+      batchTaxonomy: options.batchTaxonomy,
+      maxTagCount: options.maxTagCount,
+      allowModifyDescription: options.allowModifyDescription,
+      existingTags: options.existingTags,
+    });
+    resultMap.set(single.id, {
+      id: single.id,
+      tags: res.tags,
+      recommendedCategory: res.recommendedCategory,
+      categorizeReason: res.categorizeReason,
+      summary: res.summary,
+    });
+    return resultMap;
+  }
+
+  const settings = await getAISettings();
+  const categorizeInstruction = settings.customCategorizePrompt?.trim() || DEFAULT_CATEGORIZE_PROMPT;
+  const maxTagCount = Math.max(1, Math.min(5, options.maxTagCount ?? settings.maxTagCount ?? 2));
+  const allowModifyDescription = options.allowModifyDescription ?? settings.allowModifyDescription ?? true;
+  const batchTaxonomy = options.batchTaxonomy && options.batchTaxonomy.length > 0 ? options.batchTaxonomy : [];
+
+  const collectionsDesc = targetCollections
+    .map((c) => `- 「${c.title}」: ${c.description || '无具体说明'}`)
+    .join('\n');
+
+  // 构建待分类的文章清单（每篇标注唯一编号与 ID，附带标题与浓缩要点）
+  const articleListText = articles
+    .map((a, idx) => {
+      let summary = a.aiCommentsInsight
+        ? `${a.aiSummary || ''} (热评洞察: ${a.aiCommentsInsight})`
+        : a.aiSummary || (a.aiKeyTakeaways?.length ? a.aiKeyTakeaways.join('; ') : (a.fullContent || a.title).slice(0, 300));
+      if (!summary) summary = '无详细摘要';
+      return `[条目 ${idx + 1}] ID: ${a.id}
+- 标题: ${a.title}
+- 现有摘要/内容要点: ${summary.slice(0, 160)}
+- 当前所在收藏夹: ${a.collectionTitle || '默认'}`;
+    })
+    .join('\n\n');
+
+  const systemPrompt = `你是一位专业的个人知识库架构师与词条分类专家。
+${categorizeInstruction}
+
+【硬性约束】：
+1. 一次性批量映射：请一次性处理提供的所有文章，严禁遗漏任何一条目；
+2. 标签强制收敛：每篇文章【严格输出最多 ${maxTagCount} 个标签】（1 到 ${maxTagCount} 个），必须【严格且仅从以下收敛标签词库中选取】最匹配的标签：
+   ${batchTaxonomy.length > 0 ? batchTaxonomy.join('、') : '（请按行业一级标准建立初始词条）'}
+   坚决杜绝创造生僻、冗余新词；
+3. 推荐收藏夹：结合备选收藏夹清单，为每篇文章推荐最贴切的收藏夹名称（若均不合适填'其他'）；
+${allowModifyDescription ? '4. 描述主旨：为每篇文章提炼 60 字以内的精炼描述（summary 字段）；' : '4. 描述保持：本次无需生成 summary 描述；'}
+5. 输出格式：必须输出一个完整的 JSON 数组，严禁使用 markdown 代码块包裹，每个对象必须包含 id 字段。`;
+
+  const userPrompt = `【本批次全局收敛标签词库（强制仅从中挑选 1~${maxTagCount} 个标签）】：
+${batchTaxonomy.length > 0 ? batchTaxonomy.join('、') : '（通用标准词条）'}
+
+【用户备选收藏夹清单】：
+${collectionsDesc || '（暂无其他收藏夹）'}
+
+【本批次待分类文章清单（共 ${articles.length} 篇）】：
+${articleListText}
+
+请直接输出 JSON 数组格式（严禁代码块包裹）：
+[
+  {
+    "id": "对应条目的ID",
+    "tags": [${Array.from({ length: maxTagCount }, (_, i) => `"核心标签${i + 1}"`).join(', ')}],
+    "recommendedCategory": "备选收藏夹名称",
+    "categorizeReason": "20字以内推荐理由"${allowModifyDescription ? ',\n    "summary": "60字以内主旨描述"' : ''}
+  }
+]`;
+
+  const rawJson = await callChatCompletions([
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: userPrompt },
+  ]);
+
+  try {
+    let parsed: any = null;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      const match = rawJson.match(/\[\s*\{[\s\S]*\}\s*\]/);
+      if (match) {
+        parsed = JSON.parse(match[0]);
+      }
+    }
+
+    if (Array.isArray(parsed)) {
+      for (let i = 0; i < articles.length; i++) {
+        const art = articles[i];
+        const item = parsed.find((p: any) => p && String(p.id).trim() === art.id) || parsed[i];
+        if (item) {
+          const rawTags: string[] = Array.isArray(item.tags) ? item.tags : [];
+          const cleanTags = rawTags
+            .map((t) => String(t).trim().replace(/^#+/, ''))
+            .filter((t) => t.length > 0 && t.length <= 15)
+            .slice(0, maxTagCount);
+
+          resultMap.set(art.id, {
+            id: art.id,
+            tags: cleanTags.length > 0 ? cleanTags : (batchTaxonomy.length > 0 ? [batchTaxonomy[0]] : ['未归类']),
+            recommendedCategory: item.recommendedCategory || '默认',
+            categorizeReason: item.categorizeReason || 'AI整批聚类匹配',
+            summary: allowModifyDescription ? item.summary?.trim() : undefined,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('整批一次性打标 JSON 解析异常，准备自动兜底:', err);
+  }
+
+  // 兜底处理：若某篇文章在批量返回中遗漏，为其单独调用单篇打标保证 100% 成功
+  for (const art of articles) {
+    if (!resultMap.has(art.id)) {
+      try {
+        const fallbackRes = await categorizeArticleWithAI(art, targetCollections, {
+          batchTaxonomy,
+          maxTagCount,
+          allowModifyDescription,
+          existingTags: options.existingTags,
+        });
+        resultMap.set(art.id, {
+          id: art.id,
+          tags: fallbackRes.tags,
+          recommendedCategory: fallbackRes.recommendedCategory,
+          categorizeReason: fallbackRes.categorizeReason,
+          summary: fallbackRes.summary,
+        });
+      } catch {
+        resultMap.set(art.id, {
+          id: art.id,
+          tags: batchTaxonomy.length > 0 ? [batchTaxonomy[0]] : ['未归类'],
+          recommendedCategory: '默认',
+          categorizeReason: 'AI打标完成',
+        });
+      }
+    }
+  }
+
+  return resultMap;
+}
+
 // -------------------------------------------------------------
 // 阶段 3：全文深度精读（无字数截断限制 + 抓取热评Top5争议与实操深度洞察）
 // -------------------------------------------------------------

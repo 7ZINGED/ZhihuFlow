@@ -54,6 +54,7 @@ import {
 import { 
   quickTriageArticleWithAI,
   categorizeArticleWithAI,
+  batchCategorizeArticlesWithAI,
   synthesizeBatchTaxonomy,
   deepReadArticleWithAI,
   analyzeArticleWithAI, 
@@ -425,109 +426,224 @@ export const Dashboard: React.FC = () => {
     const totalChunks = Math.max(1, Math.ceil(tasks.length / chunkSize));
     let currentBatchTaxonomy: string[] = queueState.synthesizedTaxonomy || [];
 
-    for (let i = 0; i < tasks.length; i++) {
-      // 循环开始前检查是否已暂停或清空
-      if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
-        break;
-      }
+    if (mode === 'categorize') {
+      // 词条分类模式：采用【整批打包单次请求 (Batch One-Shot)】极速映射！
+      // 每次将一整批（例如 20 篇）在 1 个请求中交给大模型，在全局标签池下一次性返回整批标签与归属
+      for (let c = 0; c < tasks.length; c += chunkSize) {
+        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+          break;
+        }
 
-      const task = tasks[i];
-      if (task.status === 'done') continue;
+        const chunkTasks = tasks.slice(c, c + chunkSize);
+        const pendingChunkTasks = chunkTasks.filter((t) => t.status !== 'done');
+        if (pendingChunkTasks.length === 0) continue;
 
-      const currentChunkNum = Math.floor(i / chunkSize) + 1;
-      const chunkInfo = {
-        currentChunk: currentChunkNum,
-        totalChunks,
-        chunkSize,
-      };
+        const currentChunkNum = Math.floor(c / chunkSize) + 1;
+        const chunkInfo = {
+          currentChunk: currentChunkNum,
+          totalChunks,
+          chunkSize,
+        };
 
-      // 阶段 2 (Pass 1)：若进入新子批次且尚未生成收敛标签池，先综合提炼全局规范标签
-      if (mode === 'categorize' && (i % chunkSize === 0 || currentBatchTaxonomy.length === 0)) {
-        const chunkTasks = tasks.slice(i, i + chunkSize);
-        const chunkIds = chunkTasks.map((t) => t.articleId);
+        // 标记当前批次任务为 processing
+        pendingChunkTasks.forEach((t) => {
+          t.status = 'processing';
+          t.updatedAt = Date.now();
+        });
+
+        const currentProgressState: AIQueueState = {
+          status: 'running',
+          mode,
+          tasks: [...tasks],
+          currentTitle: `第 ${currentChunkNum}/${totalChunks} 批 (${pendingChunkTasks.length} 篇打包极速打标中...)`,
+          chunkInfo,
+          synthesizedTaxonomy: currentBatchTaxonomy,
+        };
+        setQueueState(currentProgressState);
+        saveQueueToStorage(currentProgressState);
+
         try {
+          const chunkIds = pendingChunkTasks.map((t) => t.articleId);
           const chunkArticles = await db.articles.where('id').anyOf(chunkIds).toArray();
+
           if (chunkArticles.length > 0) {
-            showToast(`🏷️ [分批 ${currentChunkNum}/${totalChunks}] 正在综合提炼本批次全局收敛标签...`);
-            currentBatchTaxonomy = await synthesizeBatchTaxonomy(chunkArticles, {
-              maxGlobalTags: settings.maxGlobalTags,
-              adaptiveGlobalTags: settings.adaptiveGlobalTags,
-              customPrompt: settings.customCategorizePrompt,
+            // Pass 1: 提炼本批次全局规范标签库（若尚未提炼或跨大批次时重新收敛）
+            if (currentBatchTaxonomy.length === 0 || c % (chunkSize * 2) === 0) {
+              showToast(`🏷️ [分批 ${currentChunkNum}/${totalChunks}] 正在提炼本批全局收敛标签...`);
+              currentBatchTaxonomy = await synthesizeBatchTaxonomy(chunkArticles, {
+                maxGlobalTags: settings.maxGlobalTags,
+                adaptiveGlobalTags: settings.adaptiveGlobalTags,
+                customPrompt: settings.customCategorizePrompt,
+              });
+            }
+
+            // Pass 2: 单次请求打包完成整批文章的分类归宿
+            showToast(`⚡ [分批 ${currentChunkNum}/${totalChunks}] 正在 1 次请求中打包完成 ${chunkArticles.length} 篇分类与归属...`);
+            const resultMap = await batchCategorizeArticlesWithAI(chunkArticles, collections, {
+              batchTaxonomy: currentBatchTaxonomy,
+              maxTagCount: settings.maxTagCount,
+              allowModifyDescription: settings.allowModifyDescription,
+            });
+
+            // 批量存入本地数据库
+            const allowModifyTags = settings.allowModifyTags ?? true;
+            const allowModifyDesc = settings.allowModifyDescription ?? true;
+            const maxTagCount = settings.maxTagCount || 2;
+
+            for (const art of chunkArticles) {
+              const res = resultMap.get(art.id);
+              if (res) {
+                const shouldKeepExistingTags = !allowModifyTags && art.tags && art.tags.length > 0;
+                const updateData: Partial<ZhihuArticleItem> = {
+                  aiCategory: res.recommendedCategory,
+                  aiCategoryReason: res.categorizeReason,
+                  aiClassifiedAt: Date.now(),
+                };
+                if (!shouldKeepExistingTags) {
+                  updateData.tags = res.tags.slice(0, maxTagCount);
+                }
+                if (allowModifyDesc && res.summary) {
+                  updateData.aiSummary = res.summary;
+                }
+                await db.articles.update(art.id, updateData);
+              }
+            }
+
+            pendingChunkTasks.forEach((t) => {
+              t.status = 'done';
+              t.updatedAt = Date.now();
+            });
+            consecutiveErrors = 0;
+          } else {
+            pendingChunkTasks.forEach((t) => {
+              t.status = 'failed';
+              t.error = '文章不存在或已在知乎失效';
+              t.updatedAt = Date.now();
             });
           }
-        } catch (e) {
-          console.warn('Pass 1 全局标签提炼异常:', e);
+        } catch (err: any) {
+          console.error('整批分类任务处理异常:', err);
+          pendingChunkTasks.forEach((t) => {
+            t.status = 'failed';
+            t.error = err?.message || '批处理失败';
+            t.updatedAt = Date.now();
+          });
+          consecutiveErrors++;
+
+          if (consecutiveErrors >= 3) {
+            queueStatusRef.current = 'paused';
+            showToast(`⚠️ 接口连续调用异常 [${pendingChunkTasks[0]?.error}]，队列已自动暂停保护！`);
+          }
+        }
+
+        const hasPending = tasks.some((t) => t.status === 'pending');
+        const nextStatus = queueStatusRef.current === 'paused'
+          ? 'paused'
+          : hasPending
+          ? 'running'
+          : 'completed';
+
+        const stepState: AIQueueState = {
+          status: nextStatus,
+          mode,
+          tasks: [...tasks],
+          currentTitle: undefined,
+          currentArticleId: undefined,
+          chunkInfo,
+          synthesizedTaxonomy: currentBatchTaxonomy,
+        };
+        setQueueState(stepState);
+        saveQueueToStorage(stepState);
+
+        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+          break;
+        }
+
+        if (c + chunkSize < tasks.length) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
         }
       }
+    } else {
+      // 快速粗读 与 全文精读 模式：单篇深入流式推进
+      for (let i = 0; i < tasks.length; i++) {
+        // 循环开始前检查是否已暂停或清空
+        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+          break;
+        }
 
-      // 标记当前任务为 processing 状态
-      task.status = 'processing';
-      task.updatedAt = Date.now();
-      const currentProgressState: AIQueueState = {
-        status: 'running',
-        mode,
-        tasks: [...tasks],
-        currentTitle: task.title,
-        currentArticleId: task.articleId,
-        chunkInfo,
-        synthesizedTaxonomy: currentBatchTaxonomy,
-      };
-      setQueueState(currentProgressState);
-      saveQueueToStorage(currentProgressState);
+        const task = tasks[i];
+        if (task.status === 'done') continue;
 
-      try {
-        const article = await db.articles.get(task.articleId);
-        if (!article) {
+        const currentChunkNum = Math.floor(i / chunkSize) + 1;
+        const chunkInfo = {
+          currentChunk: currentChunkNum,
+          totalChunks,
+          chunkSize,
+        };
+
+        // 标记当前任务为 processing 状态
+        task.status = 'processing';
+        task.updatedAt = Date.now();
+        const currentProgressState: AIQueueState = {
+          status: 'running',
+          mode,
+          tasks: [...tasks],
+          currentTitle: task.title,
+          currentArticleId: task.articleId,
+          chunkInfo,
+        };
+        setQueueState(currentProgressState);
+        saveQueueToStorage(currentProgressState);
+
+        try {
+          const article = await db.articles.get(task.articleId);
+          if (!article) {
+            task.status = 'failed';
+            task.error = '文章不存在或已在知乎失效';
+          } else {
+            await handleAnalyzeSingle(article, task.mode);
+            task.status = 'done';
+            consecutiveErrors = 0;
+          }
+        } catch (err: any) {
+          console.error('AI 队列处理任务失败:', err);
           task.status = 'failed';
-          task.error = '文章不存在或已在知乎失效';
-        } else {
-          // 阶段 2 (Pass 2)：基于 Pass 1 提炼出的全局标签池高精度对齐打标
-          await handleAnalyzeSingle(article, task.mode, currentBatchTaxonomy);
-          task.status = 'done';
-          consecutiveErrors = 0; // 成功则重置连续错误计数
+          task.error = err?.message || '分析失败';
+          consecutiveErrors++;
+
+          if (consecutiveErrors >= 3) {
+            queueStatusRef.current = 'paused';
+            showToast(`⚠️ 接口连续调用异常 [${task.error}]，队列已自动暂停保护！`);
+          }
         }
-      } catch (err: any) {
-        console.error('AI 队列处理任务失败:', err);
-        task.status = 'failed';
-        task.error = err?.message || '分析失败';
-        consecutiveErrors++;
 
-        // 熔断保护：连续 3 篇出现接口异常，自动暂停队列，防止 200+ 篇全部白白失败
-        if (consecutiveErrors >= 3) {
-          queueStatusRef.current = 'paused';
-          showToast(`⚠️ 接口连续调用异常 [${task.error}]，队列已自动暂停保护！`);
+        task.updatedAt = Date.now();
+
+        const hasPending = tasks.some((t) => t.status === 'pending');
+        const nextStatus = queueStatusRef.current === 'paused'
+          ? 'paused'
+          : hasPending
+          ? 'running'
+          : 'completed';
+
+        const stepState: AIQueueState = {
+          status: nextStatus,
+          mode,
+          tasks: [...tasks],
+          currentTitle: undefined,
+          currentArticleId: undefined,
+          chunkInfo,
+        };
+        setQueueState(stepState);
+        saveQueueToStorage(stepState);
+
+        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+          break;
         }
-      }
 
-      task.updatedAt = Date.now();
-
-      // 单篇处理完后再次检查暂停状态
-      const hasPending = tasks.some((t) => t.status === 'pending');
-      const nextStatus = queueStatusRef.current === 'paused'
-        ? 'paused'
-        : hasPending
-        ? 'running'
-        : 'completed';
-
-      const stepState: AIQueueState = {
-        status: nextStatus,
-        mode,
-        tasks: [...tasks],
-        currentTitle: undefined,
-        currentArticleId: undefined,
-        chunkInfo,
-        synthesizedTaxonomy: currentBatchTaxonomy,
-      };
-      setQueueState(stepState);
-      saveQueueToStorage(stepState);
-
-      if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
-        break;
-      }
-
-      // 请求间微小安全间隔 (300ms)，避免触发大模型端点的并发/频控拦截 (HTTP 429)
-      if (i < tasks.length - 1) {
-        await new Promise((resolve) => setTimeout(resolve, 300));
+        if (i < tasks.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        }
       }
     }
 

@@ -476,7 +476,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                   {/* 分类上限 */}
                   <div className="p-2.5 rounded-xl bg-white/80 dark:bg-slate-800/80 border border-slate-200/70 dark:border-slate-700/70 space-y-1">
                     <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block">
-                      🏷️ 词条分类单批上限：
+                      🏷️ 分类单次打包篇数 (1次请求)：
                     </label>
                     <div className="flex items-center gap-1.5">
                       <input
@@ -491,7 +491,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                       />
                       <span className="text-[11px] text-slate-400 shrink-0">篇</span>
                     </div>
-                    <span className="text-[10px] text-slate-400 block">默认 20 篇，任意设定</span>
+                    <span className="text-[10px] text-slate-400 block">默认 20 篇，不设上下限</span>
                   </div>
 
                   {/* 精读上限 */}
