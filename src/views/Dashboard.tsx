@@ -180,7 +180,36 @@ export const Dashboard: React.FC = () => {
     setSyncProgress('正在同步知乎收藏夹列表...');
     try {
       const list = await fetchUserCollectionsList();
+      
+      // 1. 获取本地既有收藏夹列表，找出远端已被物理删除的失效收藏夹
+      const localCols = await db.collections.toArray();
+      const remoteIds = new Set(list.map((c) => c.id));
+      const deletedCols = localCols.filter((c) => !remoteIds.has(c.id));
+
+      if (deletedCols.length > 0) {
+        const deletedIds = deletedCols.map((c) => c.id);
+        // 从本地数据库清理已被删除的收藏夹
+        await db.collections.bulkDelete(deletedIds);
+
+        // 如果当前高亮查看的收藏夹恰好被删除，安全回退到“全部”
+        if (deletedIds.includes(selectedCollectionId)) {
+          setSelectedCollectionId('all');
+        }
+
+        // 同步清理已删除收藏夹下的文章数据，避免悬空无主条目
+        for (const delId of deletedIds) {
+          await db.articles.where('collectionId').equals(delId).delete();
+        }
+      }
+
+      // 2. 将远端最新的有效收藏夹列表写入本地
       await db.collections.bulkPut(list);
+
+      if (deletedCols.length > 0) {
+        showToast(`✅ 收藏夹目录已同步！已自动清理 ${deletedCols.length} 个在知乎端被删除的收藏夹。`);
+      } else {
+        showToast(`✅ 收藏夹目录已与知乎最新状态同步！`);
+      }
     } catch (err: any) {
       console.error(err);
       setSyncProgress(`同步失败: ${err.message}`);
