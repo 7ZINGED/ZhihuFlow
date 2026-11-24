@@ -14,3 +14,5 @@
 ## Comments
 
 - 2026-11-24: 关闭前共有 23 处相关错误，主要集中在 Dashboard 的队列循环与 AI 批量解析；拆分后应大幅减少。
+- 2026-11-24: ticket 11 完成后实测 `tsc --noEmit --noUncheckedIndexedAccess`，错误不降反升到 **37 处**：`queueEngine.ts` 14、`ai.ts` 8、`queueEngine.test.ts` 5、`zhihuApi.ts` 3、`Dashboard.tsx` 2、`queueReconcile.test.ts` 2、`entrypoints/background.ts` 2、`AutoOrganizeModal.tsx` 1。新增模块也带入了数组访问。
+- 2026-11-24: 本票标注 `Blocked by: 08`（Dashboard 拆分），但 08 仍是 `ready-for-human`，当前状态与阻塞关系不一致。建议维持暂缓：现在修 37 处，等 Dashboard 后续按块拆分时大概率还要重改一遍。

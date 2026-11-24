@@ -18,7 +18,8 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 - `entrypoints/` — WXT 入口：`background.ts`、`content.ts`、`dashboard/`、`sidepanel/`
 - `src/views/Dashboard.tsx` — 分拣台主界面（当前承担较多编排逻辑，正在按票拆分）
 - `src/components/` — 文章卡片、设置、自动重分类、队列进度条等
-- `src/services/ai.ts` — OpenAI 兼容客户端、提示词、粗读 / 分类 / 精读解析
+- `src/services/ai.ts` — OpenAI 兼容客户端、粗读 / 分类 / 精读的编排与结果解析
+- `src/services/aiPrompts.ts` — 三阶段提示词的唯一来源：配置解析 + 消息数组构造（纯函数，模板改动必须过快照）
 - `src/services/aiParse.ts` — 模型响应的纯解析层：围栏、JSON 提取、标签清洗、HTTP 错误文案
 - `src/services/aiQueue.ts` — 队列检查点的持久化与恢复
 - `src/services/queueEngine.ts` — 队列推进深模块：分片、暂停、熔断、重试（端口注入，不依赖 React / Dexie）
@@ -35,7 +36,7 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 ## Architecture rules
 
 1. **远端刷新只走 `safeUpsertArticles`。** 任何从知乎拉取的数据都必须经过它合并，禁止用远端数据整表覆盖本地文章；本地 AI 产物（tags、评级、摘要、金句、评论洞察、时间戳、回收站状态）不得丢失。
-2. **AI 调用只从 `src/services/ai.ts` 发出。** 组件不得直接 `fetch` 大模型端点；提示词必须来自用户可覆盖的设置，不要在调用点硬编码。
+2. **AI 调用只从 `src/services/ai.ts` 发出。** 组件不得直接 `fetch` 大模型端点；提示词必须来自用户可覆盖的设置，且只在 `aiPrompts.ts` 里拼装，不要在调用点硬编码。
 3. **队列只有一个写入者。** 队列状态统一由 `aiQueue.ts` 的存储键管理；UI 不另写 storage key。队列是**运行检查点**而非进度真相——每篇是否处理完只看文章字段（`aiTriageRating` / `aiClassifiedAt` / `aiDeepReadAt`），载入时由 `queueReconcile.ts` 对账，运行中用 `queueLock.ts` 保证单写者。详见 ADR-0004。
 4. **行为改动必须落在公共缝上。** 测试只测公共接口，不测私有函数、不绕过接口查数据库。没有合适的缝时，先做 prefactor 票，再写行为。
 5. **本地优先、无后端。** 不引入自建服务器、遥测或第三方中转；API Key 只存 `chrome.storage.local`，不得写入源码、日志或提交历史。
@@ -61,10 +62,12 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 | `src/db/mergeArticle.ts` | 远端覆盖与本地 AI 产物保留（含 false 值） |
 | `src/db/aiPropagation.ts` | 按 contentId 折叠（偏好待处理行）、补空不覆盖、false/0 视为有效值 |
 | `src/services/aiQueue.ts` | 持久化与刷新恢复 |
+| `src/services/aiPrompts.ts` | 截断 3000 字、标签上限钳制、标签池 / 备选收藏夹注入、描述开关、精读全文与热评 |
+| `src/services/ai.prompts.snapshot.test.ts` | 9 组请求体逐字快照：证明提示词搬移「只搬不改」 |
 
-待补（见 `.scratch/foundation/`）：提示词构造（ticket 11）、`formatRawContent`。
+待补（见 `.scratch/foundation/`）：`formatRawContent`。
 
-类型检查基线：`tsconfig.json` 暂时关闭 `noUncheckedIndexedAccess`（历史代码有 23 处数组越界访问）。恢复计划见 `.scratch/foundation/issues/10-restore-index-check.md`。
+类型检查基线：`tsconfig.json` 暂时关闭 `noUncheckedIndexedAccess`。实测恢复后有 37 处错误（`queueEngine.ts` 14、`ai.ts` 8、`queueEngine.test.ts` 5 等），比 Phase 0 记录的 23 处更多——新增模块也带入了数组访问。恢复计划见 `.scratch/foundation/issues/10-restore-index-check.md`。
 
 ## Agent skills
 
