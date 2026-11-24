@@ -4,12 +4,13 @@
 
 **Blocked by:** 07
 
-**Status:** ready-for-human（自动化项已完成，仅剩 Chrome 人工冒烟）
+**Status:** 自动化冒烟 17/17 通过；仍待真实 Chrome + 知乎登录 + 真实 API Key 人工复核
 
 - [x] `runQueueLoop` 的内部实现被引擎调用替代，组件不再直接维护分片 / 熔断 / 重试状态
 - [x] 队列持久化仍通过现有存储层完成，刷新恢复行为不变
-- [ ] **手工冒烟：粗读、整批分类、精读三种模式各跑一轮**（需 Chrome，见下方清单）
-- [ ] **手工冒烟：暂停、继续、清空、失败重试、刷新后恢复**（需 Chrome，见下方清单）
+- [x] **冒烟：粗读、整批分类、精读三种模式各跑一轮**（自动化覆盖：Edge + mock，见 Comments）
+- [x] **冒烟：暂停、继续、清空、失败重试、刷新后恢复**（自动化覆盖：Edge + mock，见 Comments）
+- [ ] **真实环境复核：Chrome + 已登录知乎收藏夹 + 真实 API Key 再跑一遍清单**（本次未覆盖）
 - [x] `Dashboard.tsx` 降到 800 行以内：**772 行**
 - [x] `npm run check` 通过（严格索引检查已恢复，142 条测试全绿）
 
@@ -56,3 +57,9 @@
 - 2026-11-24: 已完成接线：`runQueueLoop` 现在只构造引擎、传端口、等 `run` 结束并释放锁，约 40 行（原 243 行）。`handlePauseQueue` / `handleClearQueue` 额外调用 `engine.pause()`，暂停与清空由引擎自己判断退出点。
 - 2026-11-24: 原记录称「Dashboard 1700 行应另开票，不再压在 08」；用户要求继续完成，本轮已直接拆到 772 行，达标。
 - 2026-11-24: 拆分期间验证 142 条测试始终全绿；每步抽取后都跑 `npm run check`，未引入行为变化。
+- 2026-11-24: **自动化冒烟 17/17 通过**。环境：Edge 158.0.4370.33 / Windows，独立 profile，扩展 ID `ocmkkpfhfkcebjbaciaflpifmmjgliga`，加载 `.output/chrome-mv3`（README 与旧清单写的 `dist/` 已过时，实际产物目录是 `.output/chrome-mv3`）。AI 端点用本地 mock OpenAI-compatible 响应，文章用 IndexedDB 种子数据；**未登录知乎、未使用真实 API Key**。
+  - 三种模式：粗读 4/4 写入 `aiTriageRating`/`aiSummary`/`aiProcessedAt`；分类 4/4 写入 1~2 个标签与 `aiCategory`；精读 4/4 写入 `aiDeepReadAt`/`aiCommentsInsight`/`hotComments`。
+  - 生命周期：暂停后 500ms 内 done 数不变；继续后 9/9 完成；暂停态清空队列后 localStorage `zh_ai_batch_queue_v1` 为 null 且面板消失；401 失败 2/2 落库并可重试为 done；运行中刷新后出现「已从本地安全恢复」且 UI 停在暂停态，继续后 9/9 完成。
+  - 去重/传播：3 篇中 1 篇已粗读时弹出跳过确认；2 篇同 `contentId` 折叠为 1 个任务，AI 结果传播到另一成员，两者均为 `keep`。
+  - 截图与原始结果：`.scratch/smoke/01-quick-done.png` ～ `08-dedupe-propagation.png`，`.scratch/smoke/results.json`。
+  - 差异说明：本次按用户选择用 Edge 替代 Chrome，并用 mock/种子数据替代真实知乎收藏夹与真实 API Key。真实环境复核项已单独列为未完成 checklist 条目，不能据本次结果视为已完成。

@@ -1,0 +1,94 @@
+{
+  "date": "2026-11-24T04:58:04.736Z",
+  "environment": "Edge 158.0.4370.33 / Windows / chrome-extension://ocmkkpfhfkcebjbaciaflpifmmjgliga / mock OpenAI endpoint on 127.0.0.1:11434",
+  "passed": 17,
+  "failed": 0,
+  "results": [
+    {
+      "name": "环境准备",
+      "pass": true,
+      "detail": "Edge 158 + 扩展 ocmkkp... + mock OpenAI 端点 + 4 篇种子文章"
+    },
+    {
+      "name": "三种模式-粗读队列完成",
+      "pass": true,
+      "detail": "status=completed, tasks=4"
+    },
+    {
+      "name": "三种模式-粗读字段写入",
+      "pass": true,
+      "detail": "4/4 篇有 aiProcessedAt"
+    },
+    {
+      "name": "三种模式-分类队列完成",
+      "pass": true,
+      "detail": "status=completed, tasks=4"
+    },
+    {
+      "name": "三种模式-分类字段写入",
+      "pass": true,
+      "detail": "tags=[\"工作流\"], aiCategory=技术收藏"
+    },
+    {
+      "name": "三种模式-精读队列完成",
+      "pass": true,
+      "detail": "status=completed, tasks=4"
+    },
+    {
+      "name": "三种模式-精读字段写入",
+      "pass": true,
+      "detail": "4/4 篇有 aiDeepReadAt"
+    },
+    {
+      "name": "生命周期-暂停停止推进",
+      "pass": true,
+      "detail": "暂停时 done=1, 500ms 后 done=1"
+    },
+    {
+      "name": "生命周期-继续续跑",
+      "pass": true,
+      "detail": "status=completed, done=9/9"
+    },
+    {
+      "name": "生命周期-暂停态清空队列",
+      "pass": true,
+      "detail": "clicked=true, storage=null, panelGone=true"
+    },
+    {
+      "name": "生命周期-失败落库",
+      "pass": true,
+      "detail": "failed=2, error=AI 请求失败 [401]: {\"error\":\"smoke failure\"}"
+    },
+    {
+      "name": "生命周期-失败重试",
+      "pass": true,
+      "detail": "status=completed, done=2/2"
+    },
+    {
+      "name": "生命周期-刷新恢复提示",
+      "pass": true,
+      "detail": "toast=true, pausedButton=true, status=running, pending=8"
+    },
+    {
+      "name": "生命周期-恢复后继续",
+      "pass": true,
+      "detail": "status=completed, done=9/9"
+    },
+    {
+      "name": "粗读-跳过去重提示",
+      "pass": true,
+      "detail": "confirm=[\"选中的 3 篇中有 1 篇已完成过快速粗读。\\n\\n点击【确定】跳过已读内容，仅处理剩余 2 篇未读文章；\\n点击【取消】对选中的全部 3 篇重新粗读。\"]"
+    },
+    {
+      "name": "去重-同内容折叠",
+      "pass": true,
+      "detail": "tasks=1, toast=true"
+    },
+    {
+      "name": "去重-结果传播到同内容成员",
+      "pass": true,
+      "detail": "shared=2, ratings=[\"keep\",\"keep\"]"
+    }
+  ],
+  "screenshots": "C:/Users/24158/Desktop/ZhihuFlow/.scratch/smoke"
+}
