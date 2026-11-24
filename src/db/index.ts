@@ -1,4 +1,5 @@
 import Dexie, { type Table } from 'dexie';
+import { mergeArticle } from './mergeArticle';
 
 export interface ZhihuCollection {
   id: string; // 收藏夹 ID (纯数字字符串)
@@ -115,30 +116,7 @@ export async function safeUpsertArticles(newItems: ZhihuArticleItem[]): Promise<
   const mergedItems: ZhihuArticleItem[] = newItems.map((newItem) => {
     const existing = existingMap.get(newItem.id) || existingByContentMap.get(newItem.contentId);
     if (!existing) return newItem;
-
-    return {
-      ...newItem,
-      // 保护本地 AI 分析与用户标记结果
-      tags: existing.tags && existing.tags.length > 0 ? existing.tags : newItem.tags,
-      aiSummary: existing.aiSummary || newItem.aiSummary,
-      aiKeyTakeaways: existing.aiKeyTakeaways || newItem.aiKeyTakeaways,
-      aiCategory: existing.aiCategory || newItem.aiCategory,
-      aiCategoryReason: existing.aiCategoryReason || newItem.aiCategoryReason,
-      aiTriageRating: existing.aiTriageRating || newItem.aiTriageRating,
-      aiTriageReason: existing.aiTriageReason || newItem.aiTriageReason,
-      aiCommentsInsight: existing.aiCommentsInsight || newItem.aiCommentsInsight,
-      hotComments: existing.hotComments || newItem.hotComments,
-      aiProcessedAt: existing.aiProcessedAt || newItem.aiProcessedAt,
-      aiClassifiedAt: existing.aiClassifiedAt || newItem.aiClassifiedAt,
-      aiDeepReadAt: existing.aiDeepReadAt || newItem.aiDeepReadAt,
-      aiReadingMode: existing.aiReadingMode || newItem.aiReadingMode,
-      isTruncated: existing.isTruncated ?? newItem.isTruncated,
-      totalWordCount: existing.totalWordCount ?? newItem.totalWordCount,
-      inTrash: existing.inTrash ?? newItem.inTrash,
-      trashedAt: existing.trashedAt ?? newItem.trashedAt,
-      selected: existing.selected ?? newItem.selected,
-      markedForDelete: existing.markedForDelete ?? newItem.markedForDelete,
-    };
+    return mergeArticle(existing, newItem);
   });
 
   await db.articles.bulkPut(mergedItems);

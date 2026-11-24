@@ -1,4 +1,5 @@
 import { type AISettings } from '../db';
+import { mapHttpError, normalizeTags, parseAiJson, stripCodeFence } from './aiParse';
 
 export const DEFAULT_TRIAGE_PROMPT = `你是一位敏捷的内容初审与个人知识库专家。请对知乎内容进行【快速粗读初筛】与质量评估：
 1. 提炼核心主旨（100字内）与 3 个关键实操/要点；
@@ -93,31 +94,12 @@ async function callChatCompletions(
 
   if (!response.ok) {
     const errorText = await response.text();
-    let friendlyMsg = errorText;
-    try {
-      const parsed = JSON.parse(errorText);
-      if (parsed?.error?.message) {
-        friendlyMsg = parsed.error.message;
-      }
-    } catch {}
-
-    // 智能提取核心原因，避免数百字符的长堆栈把 UI 撑爆
-    if (friendlyMsg.includes('connectex') || friendlyMsg.includes('dial tcp') || friendlyMsg.includes('timeout') || friendlyMsg.includes('Failed to fetch')) {
-      friendlyMsg = '网络连接超时（无法连接到上游模型服务，请检查网络/节点代理）';
-    } else if (friendlyMsg.includes('auth_unavailable')) {
-      friendlyMsg = '上游服务凭据失效或连接中断 (auth_unavailable)';
-    }
-
-    if (friendlyMsg.length > 80) {
-      friendlyMsg = friendlyMsg.slice(0, 80) + '...';
-    }
-
-    throw new Error(`AI 请求失败 [${response.status}]: ${friendlyMsg}`);
+    throw new Error(`AI 请求失败 [${response.status}]: ${mapHttpError(response.status, errorText)}`);
   }
 
   const json = await response.json();
   const rawText = json.choices?.[0]?.message?.content?.trim() || '';
-  return rawText.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim();
+  return stripCodeFence(rawText);
 }
 
 // -------------------------------------------------------------
@@ -175,7 +157,8 @@ ${contentToSend}
   ]);
 
   try {
-    const parsed = JSON.parse(rawJson);
+    const parsed = parseAiJson<any>(rawJson);
+    if (!parsed) throw new Error('粗读结果不是合法 JSON');
     return {
       summary: parsed.summary || '暂无摘要',
       keyTakeaways: Array.isArray(parsed.keyTakeaways) ? parsed.keyTakeaways : [],
@@ -277,12 +260,9 @@ ${customPrompt ? `【用户自定义分类指导要求】：\n${customPrompt}\n`
       0.2
     );
 
-    const parsed = JSON.parse(rawJson);
+    const parsed = parseAiJson<unknown>(rawJson);
     if (Array.isArray(parsed)) {
-      const clean = parsed
-        .map((t) => String(t).trim().replace(/^#+/, ''))
-        .filter((t) => t.length > 0 && t.length <= 15)
-        .slice(0, maxGlobalTags);
+      const clean = normalizeTags(parsed, maxGlobalTags);
       if (clean.length > 0) return clean;
     }
   } catch (err) {
@@ -378,13 +358,10 @@ ${collectionsDesc || '（暂无其他收藏夹）'}
   ]);
 
   try {
-    const parsed = JSON.parse(rawJson);
-    const rawTags: string[] = Array.isArray(parsed.tags) ? parsed.tags : [];
+    const parsed = parseAiJson<any>(rawJson);
+    if (!parsed) throw new Error('词条分类结果不是合法 JSON');
     // 严格限制为 1 ~ maxTagCount 个规范标签，过滤无效空值与符号
-    const cleanTags = rawTags
-      .map((t) => String(t).trim().replace(/^#+/, ''))
-      .filter((t) => t.length > 0 && t.length <= 15)
-      .slice(0, maxTagCount);
+    const cleanTags = normalizeTags(parsed.tags, maxTagCount);
 
     return {
       tags: cleanTags.length > 0 ? cleanTags : ['未归类'],
@@ -514,26 +491,14 @@ ${articleListText}
   ]);
 
   try {
-    let parsed: any = null;
-    try {
-      parsed = JSON.parse(rawJson);
-    } catch {
-      const match = rawJson.match(/\[\s*\{[\s\S]*\}\s*\]/);
-      if (match) {
-        parsed = JSON.parse(match[0]);
-      }
-    }
+    const parsed: any = parseAiJson(rawJson);
 
     if (Array.isArray(parsed)) {
       for (let i = 0; i < articles.length; i++) {
         const art = articles[i];
         const item = parsed.find((p: any) => p && String(p.id).trim() === art.id) || parsed[i];
         if (item) {
-          const rawTags: string[] = Array.isArray(item.tags) ? item.tags : [];
-          const cleanTags = rawTags
-            .map((t) => String(t).trim().replace(/^#+/, ''))
-            .filter((t) => t.length > 0 && t.length <= 15)
-            .slice(0, maxTagCount);
+          const cleanTags = normalizeTags(item.tags, maxTagCount);
 
           resultMap.set(art.id, {
             id: art.id,
@@ -639,7 +604,8 @@ ${commentsText}
   ]);
 
   try {
-    const parsed = JSON.parse(rawJson);
+    const parsed = parseAiJson<any>(rawJson);
+    if (!parsed) throw new Error('精读结果不是合法 JSON');
     return {
       summary: parsed.summary || '暂无深度精读摘要',
       keyTakeaways: Array.isArray(parsed.keyTakeaways) ? parsed.keyTakeaways : [],
