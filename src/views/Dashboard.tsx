@@ -47,6 +47,7 @@ import {
 } from '../services/aiQueue';
 import { reconcileQueueWithProgress } from '../services/queueReconcile';
 import { acquireQueueLock, releaseQueueLock } from '../services/queueLock';
+import { createQueueEngine, type QueueEngine } from '../services/queueEngine';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
@@ -104,10 +105,7 @@ export const Dashboard: React.FC = () => {
   const [queueState, setQueueState] = useState<AIQueueState>(() => loadQueueFromStorage());
   const queueStatusRef = useRef<AIQueueState['status']>(queueState.status);
   const isProcessingRef = useRef<boolean>(false);
-
-  // 通过函数读取 ref，避免 TypeScript 把异步流程中的状态过度收窄为 'running'
-  const isQueueStopped = () =>
-    queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle';
+  const engineRef = useRef<QueueEngine | null>(null);
 
   useEffect(() => {
     queueStatusRef.current = queueState.status;
@@ -501,248 +499,61 @@ export const Dashboard: React.FC = () => {
   };
 
   // 核心队列执行器：逐篇处理任务，支持实时暂停、取消与异常容错
+  // 核心队列执行器：分片 / 暂停 / 熔断由 queueEngine 承担，UI 只同步状态与生命周期
   const runQueueLoop = async (tasksList: AIQueueTask[], mode: 'quick' | 'categorize' | 'deep') => {
     if (isProcessingRef.current) return;
     isProcessingRef.current = true;
     queueStatusRef.current = 'running';
 
-    const tasks = [...tasksList];
-    let consecutiveErrors = 0;
+    const engine = createQueueEngine(
+      {
+        loadSettings: () => getAISettings(),
+        collections,
+        analyzeSingle: (article, m) => handleAnalyzeSingle(article, m),
+        loadArticle: (id) => db.articles.get(id),
+        loadArticles: (ids) => db.articles.where('id').anyOf(ids).toArray(),
+        updateArticle: async (id, patch) => {
+          await db.articles.update(id, patch);
+        },
+        synthesizeTaxonomy: (arts, opts) => synthesizeBatchTaxonomy(arts, opts),
+        batchCategorize: async (arts, cols, opts) => {
+          const result = await batchCategorizeArticlesWithAI(arts, cols, opts);
+          return new Map(
+            Array.from(result, ([id, item]) =>
+              [
+                id,
+                {
+                  tags: item.tags,
+                  recommendedCategory: item.recommendedCategory,
+                  categorizeReason: item.categorizeReason,
+                  summary: item.summary,
+                },
+              ] as const
+            )
+          );
+        },
+        notify: (message) => showToast(message),
+        commit: (next) => {
+          setQueueState(next);
+          saveQueueToStorage(next);
+        },
+        now: () => Date.now(),
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        log: (message, error) => console.error(message, error),
+      },
+      queueState
+    );
 
-    const settings = await getAISettings();
-    let chunkSize = 20;
-    if (mode === 'quick') chunkSize = settings.batchLimitQuick || 30;
-    else if (mode === 'categorize') chunkSize = settings.batchLimitCategorize || 20;
-    else if (mode === 'deep') chunkSize = settings.batchLimitDeep || 10;
-    chunkSize = Math.max(1, chunkSize);
+    engineRef.current = engine;
 
-    const totalChunks = Math.max(1, Math.ceil(tasks.length / chunkSize));
-    let currentBatchTaxonomy: string[] = queueState.synthesizedTaxonomy || [];
-
-    if (mode === 'categorize') {
-      // 词条分类模式：采用【整批打包单次请求 (Batch One-Shot)】极速映射！
-      // 每次将一整批（例如 20 篇）在 1 个请求中交给大模型，在全局标签池下一次性返回整批标签与归属
-      for (let c = 0; c < tasks.length; c += chunkSize) {
-        if (isQueueStopped()) {
-          break;
-        }
-
-        const chunkTasks = tasks.slice(c, c + chunkSize);
-        const pendingChunkTasks = chunkTasks.filter((t) => t.status !== 'done');
-        if (pendingChunkTasks.length === 0) continue;
-
-        const currentChunkNum = Math.floor(c / chunkSize) + 1;
-        const chunkInfo = {
-          currentChunk: currentChunkNum,
-          totalChunks,
-          chunkSize,
-        };
-
-        // 标记当前批次任务为 processing
-        pendingChunkTasks.forEach((t) => {
-          t.status = 'processing';
-          t.updatedAt = Date.now();
-        });
-
-        const currentProgressState: AIQueueState = {
-          status: 'running',
-          mode,
-          tasks: [...tasks],
-          currentTitle: `第 ${currentChunkNum}/${totalChunks} 批 (${pendingChunkTasks.length} 篇打包极速打标中...)`,
-          chunkInfo,
-          synthesizedTaxonomy: currentBatchTaxonomy,
-        };
-        setQueueState(currentProgressState);
-        saveQueueToStorage(currentProgressState);
-
-        try {
-          const chunkIds = pendingChunkTasks.map((t) => t.articleId);
-          const chunkArticles = await db.articles.where('id').anyOf(chunkIds).toArray();
-
-          if (chunkArticles.length > 0) {
-            // Pass 1: 提炼本批次全局规范标签库（若尚未提炼或跨大批次时重新收敛）
-            if (currentBatchTaxonomy.length === 0 || c % (chunkSize * 2) === 0) {
-              showToast(`🏷️ [分批 ${currentChunkNum}/${totalChunks}] 正在提炼本批全局收敛标签...`);
-              currentBatchTaxonomy = await synthesizeBatchTaxonomy(chunkArticles, {
-                maxGlobalTags: settings.maxGlobalTags,
-                adaptiveGlobalTags: settings.adaptiveGlobalTags,
-                customPrompt: settings.customCategorizePrompt,
-              });
-            }
-
-            // Pass 2: 单次请求打包完成整批文章的分类归宿
-            showToast(`⚡ [分批 ${currentChunkNum}/${totalChunks}] 正在 1 次请求中打包完成 ${chunkArticles.length} 篇分类与归属...`);
-            const resultMap = await batchCategorizeArticlesWithAI(chunkArticles, collections, {
-              batchTaxonomy: currentBatchTaxonomy,
-              maxTagCount: settings.maxTagCount,
-              allowModifyDescription: settings.allowModifyDescription,
-            });
-
-            // 批量存入本地数据库
-            const allowModifyTags = settings.allowModifyTags ?? true;
-            const allowModifyDesc = settings.allowModifyDescription ?? true;
-            const maxTagCount = settings.maxTagCount || 2;
-
-            for (const art of chunkArticles) {
-              const res = resultMap.get(art.id);
-              if (res) {
-                const shouldKeepExistingTags = !allowModifyTags && art.tags && art.tags.length > 0;
-                const updateData: Partial<ZhihuArticleItem> = {
-                  aiCategory: res.recommendedCategory,
-                  aiCategoryReason: res.categorizeReason,
-                  aiClassifiedAt: Date.now(),
-                };
-                if (!shouldKeepExistingTags) {
-                  updateData.tags = res.tags.slice(0, maxTagCount);
-                }
-                if (allowModifyDesc && res.summary) {
-                  updateData.aiSummary = res.summary;
-                }
-                await db.articles.update(art.id, updateData);
-              }
-            }
-
-            pendingChunkTasks.forEach((t) => {
-              t.status = 'done';
-              t.updatedAt = Date.now();
-            });
-            consecutiveErrors = 0;
-          } else {
-            pendingChunkTasks.forEach((t) => {
-              t.status = 'failed';
-              t.error = '文章不存在或已在知乎失效';
-              t.updatedAt = Date.now();
-            });
-          }
-        } catch (err: any) {
-          console.error('整批分类任务处理异常:', err);
-          pendingChunkTasks.forEach((t) => {
-            t.status = 'failed';
-            t.error = err?.message || '批处理失败';
-            t.updatedAt = Date.now();
-          });
-          consecutiveErrors++;
-
-          if (consecutiveErrors >= 3) {
-            queueStatusRef.current = 'paused';
-            showToast(`⚠️ 接口连续调用异常 [${pendingChunkTasks[0]?.error}]，队列已自动暂停保护！`);
-          }
-        }
-
-        const hasPending = tasks.some((t) => t.status === 'pending');
-        const nextStatus = queueStatusRef.current === 'paused'
-          ? 'paused'
-          : hasPending
-          ? 'running'
-          : 'completed';
-
-        const stepState: AIQueueState = {
-          status: nextStatus,
-          mode,
-          tasks: [...tasks],
-          currentTitle: undefined,
-          currentArticleId: undefined,
-          chunkInfo,
-          synthesizedTaxonomy: currentBatchTaxonomy,
-        };
-        setQueueState(stepState);
-        saveQueueToStorage(stepState);
-
-        if (isQueueStopped()) {
-          break;
-        }
-
-        if (c + chunkSize < tasks.length) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-        }
-      }
-    } else {
-      // 快速粗读 与 全文精读 模式：单篇深入流式推进
-      for (let i = 0; i < tasks.length; i++) {
-        // 循环开始前检查是否已暂停或清空
-        if (isQueueStopped()) {
-          break;
-        }
-
-        const task = tasks[i];
-        if (task.status === 'done') continue;
-
-        const currentChunkNum = Math.floor(i / chunkSize) + 1;
-        const chunkInfo = {
-          currentChunk: currentChunkNum,
-          totalChunks,
-          chunkSize,
-        };
-
-        // 标记当前任务为 processing 状态
-        task.status = 'processing';
-        task.updatedAt = Date.now();
-        const currentProgressState: AIQueueState = {
-          status: 'running',
-          mode,
-          tasks: [...tasks],
-          currentTitle: task.title,
-          currentArticleId: task.articleId,
-          chunkInfo,
-        };
-        setQueueState(currentProgressState);
-        saveQueueToStorage(currentProgressState);
-
-        try {
-          const article = await db.articles.get(task.articleId);
-          if (!article) {
-            task.status = 'failed';
-            task.error = '文章不存在或已在知乎失效';
-          } else {
-            await handleAnalyzeSingle(article, task.mode);
-            task.status = 'done';
-            consecutiveErrors = 0;
-          }
-        } catch (err: any) {
-          console.error('AI 队列处理任务失败:', err);
-          task.status = 'failed';
-          task.error = err?.message || '分析失败';
-          consecutiveErrors++;
-
-          if (consecutiveErrors >= 3) {
-            queueStatusRef.current = 'paused';
-            showToast(`⚠️ 接口连续调用异常 [${task.error}]，队列已自动暂停保护！`);
-          }
-        }
-
-        task.updatedAt = Date.now();
-
-        const hasPending = tasks.some((t) => t.status === 'pending');
-        const nextStatus = queueStatusRef.current === 'paused'
-          ? 'paused'
-          : hasPending
-          ? 'running'
-          : 'completed';
-
-        const stepState: AIQueueState = {
-          status: nextStatus,
-          mode,
-          tasks: [...tasks],
-          currentTitle: undefined,
-          currentArticleId: undefined,
-          chunkInfo,
-        };
-        setQueueState(stepState);
-        saveQueueToStorage(stepState);
-
-        if (isQueueStopped()) {
-          break;
-        }
-
-        if (i < tasks.length - 1) {
-          await new Promise((resolve) => setTimeout(resolve, 300));
-        }
-      }
+    try {
+      await engine.run(tasksList, mode);
+    } finally {
+      engineRef.current = null;
+      // 循环因暂停 / 完成而退出：释放所有权，允许用户在本页或其他页重新接管
+      releaseQueueLock();
+      isProcessingRef.current = false;
     }
-
-    isProcessingRef.current = false;
-    // 循环因暂停 / 完成而退出：释放所有权，允许用户在本页或其他页重新接管
-    releaseQueueLock();
   };
 
   // 批量 AI 分拣：加入持久化任务队列并启动 (支持随时暂停与刷新断点恢复)
@@ -881,6 +692,7 @@ export const Dashboard: React.FC = () => {
 
   // 暂停队列处理
   const handlePauseQueue = () => {
+    engineRef.current?.pause();
     queueStatusRef.current = 'paused';
     setQueueState((prev) => {
       const next: AIQueueState = {
@@ -914,6 +726,7 @@ export const Dashboard: React.FC = () => {
 
   // 清空/终止队列
   const handleClearQueue = () => {
+    engineRef.current?.pause();
     queueStatusRef.current = 'idle';
     isProcessingRef.current = false;
     releaseQueueLock();

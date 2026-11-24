@@ -19,7 +19,11 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 - `src/views/Dashboard.tsx` — 分拣台主界面（当前承担较多编排逻辑，正在按票拆分）
 - `src/components/` — 文章卡片、设置、自动重分类、队列进度条等
 - `src/services/ai.ts` — OpenAI 兼容客户端、提示词、粗读 / 分类 / 精读解析
-- `src/services/aiQueue.ts` — 队列状态的持久化与恢复
+- `src/services/aiParse.ts` — 模型响应的纯解析层：围栏、JSON 提取、标签清洗、HTTP 错误文案
+- `src/services/aiQueue.ts` — 队列检查点的持久化与恢复
+- `src/services/queueEngine.ts` — 队列推进深模块：分片、暂停、熔断、重试（端口注入，不依赖 React / Dexie）
+- `src/services/queueReconcile.ts` — 按文章字段对账队列状态（ADR-0004）
+- `src/services/queueLock.ts` — 队列单写者锁
 - `src/services/zhihuApi.ts` — 知乎登录态、收藏夹抓取、移动 / 删除 / 评论接口
 - `src/services/exporter.ts`、`backup.ts` — Markdown / Obsidian 导出与本地备份
 - `src/db/index.ts` — Dexie 数据库、`safeUpsertArticles` 增量合并
@@ -48,9 +52,16 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 
 ## Current testing seams
 
-已覆盖：`normalizeEndpoint`、AI 队列的持久化与刷新恢复。
+| 缝 | 覆盖 |
+| :--- | :--- |
+| `src/services/aiParse.ts` | 围栏 / 杂质 / 空响应 / 非法 JSON / HTML 错误页 / 截断 |
+| `src/services/queueEngine.ts` | 分片、跳过 done、暂停、resume、熔断、retryFailed、clear、subscribe |
+| `src/services/queueReconcile.ts` | 按文章字段补标 done、processing 回退、不回退已 done |
+| `src/services/queueLock.ts` | 单写者获取 / 冲突 / 释放 / 不支持时降级 |
+| `src/db/mergeArticle.ts` | 远端覆盖与本地 AI 产物保留（含 false 值） |
+| `src/services/aiQueue.ts` | 持久化与刷新恢复 |
 
-计划覆盖（见 `.scratch/foundation/`）：`mergeArticle`（安全合并）、AI JSON 解析与提示词构造、`formatRawContent`、`queueEngine`（分片 / 暂停恢复 / 熔断）。
+待补（见 `.scratch/foundation/`）：提示词构造（ticket 11）、`formatRawContent`。
 
 类型检查基线：`tsconfig.json` 暂时关闭 `noUncheckedIndexedAccess`（历史代码有 23 处数组越界访问）。恢复计划见 `.scratch/foundation/issues/10-restore-index-check.md`。
 
