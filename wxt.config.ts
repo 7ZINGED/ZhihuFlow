@@ -23,7 +23,10 @@ export default defineConfig({
       'https://api.deepseek.com/*',
       'https://api.openai.com/*',
       'http://localhost:*/*',
-      'http://127.0.0.1:*/*'
+      'http://127.0.0.1:*/*',
+      'https://open.bigmodel.cn/*',
+      'https://generativelanguage.googleapis.com/*',
+      'https://api.moonshot.cn/*'
     ],
     side_panel: {
       default_path: 'sidepanel.html',
