@@ -1,6 +1,30 @@
 import type { ZhihuArticleItem } from './index';
 
 /**
+ * 同一 `contentId` 可能对应多行——每行代表「一条收藏夹成员关系」（`id = ${collectionId}_${contentId}`）。
+ * 当新成员加入时需要从已有成员中继承 AI 产物，此时应选产物最完整的一行，
+ * 而不是依赖查询顺序。时间戳越新说明推进得越深。
+ *
+ * 同分时按 id 字典序取最小值，保证结果与输入顺序无关。
+ */
+export function pickInheritanceSource(
+  rows: readonly ZhihuArticleItem[]
+): ZhihuArticleItem | undefined {
+  let best: ZhihuArticleItem | undefined;
+  let bestScore = -1;
+
+  for (const row of rows) {
+    const score = Math.max(row.aiDeepReadAt ?? 0, row.aiClassifiedAt ?? 0, row.aiProcessedAt ?? 0);
+    if (score > bestScore || (score === bestScore && best !== undefined && row.id < best.id)) {
+      best = row;
+      bestScore = score;
+    }
+  }
+
+  return best;
+}
+
+/**
  * 合并一篇「远端刷新得到的文章」与「本地已有文章」。
  *
  * 规则：远端字段（标题、正文、点赞、评论、时间等）覆盖本地；

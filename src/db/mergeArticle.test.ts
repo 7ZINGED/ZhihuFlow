@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ZhihuArticleItem } from './index';
-import { mergeArticle } from './mergeArticle';
+import { mergeArticle, pickInheritanceSource } from './mergeArticle';
 
 function article(overrides: Partial<ZhihuArticleItem> = {}): ZhihuArticleItem {
   return {
@@ -95,5 +95,28 @@ describe('mergeArticle', () => {
 
     expect(merged.aiSummary).toBe('远端带了摘要');
     expect(merged.totalWordCount).toBe(1200);
+  });
+});
+
+describe('pickInheritanceSource', () => {
+  it('多行同内容时选产物最完整的一行，与输入顺序无关', () => {
+    const empty = article({ id: 'c1_100', collectionId: 'c1' });
+    const classified = article({ id: 'c2_100', collectionId: 'c2', aiClassifiedAt: 5 });
+    const deepRead = article({ id: 'c3_100', collectionId: 'c3', aiDeepReadAt: 9 });
+
+    expect(pickInheritanceSource([empty, classified, deepRead])?.id).toBe('c3_100');
+    expect(pickInheritanceSource([deepRead, empty, classified])?.id).toBe('c3_100');
+  });
+
+  it('同分时按 id 字典序取最小，保证确定性', () => {
+    const b = article({ id: 'c2_100', collectionId: 'c2', aiClassifiedAt: 5 });
+    const a = article({ id: 'c1_100', collectionId: 'c1', aiClassifiedAt: 5 });
+
+    expect(pickInheritanceSource([b, a])?.id).toBe('c1_100');
+    expect(pickInheritanceSource([a, b])?.id).toBe('c1_100');
+  });
+
+  it('空输入返回 undefined', () => {
+    expect(pickInheritanceSource([])).toBeUndefined();
   });
 });

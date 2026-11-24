@@ -55,4 +55,21 @@ describe('safeUpsertArticles', () => {
 
     expect(await db.articles.count()).toBe(0);
   });
+
+  it('同一内容分属多个收藏夹时各自成行，新成员继承产物最完整的一行', async () => {
+    await safeUpsertArticles([article({ id: 'c1_100', aiProcessedAt: 1 })]);
+    await safeUpsertArticles([
+      article({ id: 'c2_100', collectionId: 'c2', aiDeepReadAt: 9, aiSummary: '精读摘要' }),
+    ]);
+
+    // 第三个收藏夹也收了这篇内容
+    await safeUpsertArticles([article({ id: 'c3_100', collectionId: 'c3' })]);
+
+    const inherited = await db.articles.get('c3_100');
+    expect(inherited?.aiSummary).toBe('精读摘要');
+    expect(inherited?.aiDeepReadAt).toBe(9);
+
+    // 成员关系各占一行是既有模型，不会替换旧行
+    expect(await db.articles.count()).toBe(3);
+  });
 });

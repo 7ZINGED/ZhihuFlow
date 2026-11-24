@@ -1,5 +1,5 @@
 import Dexie, { type Table } from 'dexie';
-import { mergeArticle } from './mergeArticle';
+import { mergeArticle, pickInheritanceSource } from './mergeArticle';
 
 export interface ZhihuCollection {
   id: string; // 收藏夹 ID (纯数字字符串)
@@ -101,6 +101,10 @@ export const db = new ZhihuDigestDatabase();
  * aiCategory, aiCategoryReason, aiCommentsInsight, hotComments,
  * aiProcessedAt, aiClassifiedAt, aiDeepReadAt, aiReadingMode,
  * inTrash, trashedAt, markedForDelete 等本地字段
+ *
+ * 一行 = 一条「收藏夹成员关系」，主键 `${collectionId}_${contentId}`。
+ * 同一内容收进多个收藏夹会保留多行；新成员按 `pickInheritanceSource` 从产物最完整的
+ * 同内容行继承（见 GLOSSARY「收藏夹成员」、ticket 12）。
  */
 export async function safeUpsertArticles(newItems: ZhihuArticleItem[]): Promise<void> {
   if (!newItems || newItems.length === 0) return;
@@ -111,7 +115,20 @@ export async function safeUpsertArticles(newItems: ZhihuArticleItem[]): Promise<
 
   const contentIds = newItems.map((item) => item.contentId).filter(Boolean);
   const existingByContentList = await db.articles.where('contentId').anyOf(contentIds).toArray();
-  const existingByContentMap = new Map(existingByContentList.map((a) => [a.contentId, a]));
+
+  // 同一内容可能存在于多个收藏夹（多行成员关系）。继承来源取产物最完整的一行，
+  // 避免「新成员继承了一个还没分析过的空行」。
+  const rowsByContent = new Map<string, ZhihuArticleItem[]>();
+  for (const row of existingByContentList) {
+    const rows = rowsByContent.get(row.contentId) ?? [];
+    rows.push(row);
+    rowsByContent.set(row.contentId, rows);
+  }
+  const existingByContentMap = new Map<string, ZhihuArticleItem>();
+  for (const [contentId, rows] of rowsByContent) {
+    const source = pickInheritanceSource(rows);
+    if (source) existingByContentMap.set(contentId, source);
+  }
 
   const mergedItems: ZhihuArticleItem[] = newItems.map((newItem) => {
     const existing = existingMap.get(newItem.id) || existingByContentMap.get(newItem.contentId);
