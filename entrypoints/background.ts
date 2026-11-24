@@ -17,8 +17,9 @@ export default defineBackground(() => {
   async function openDashboard() {
     const url = chrome.runtime.getURL('dashboard.html');
     const tabs = await chrome.tabs.query({ url });
-    if (tabs.length > 0 && tabs[0].id) {
-      await chrome.tabs.update(tabs[0].id, { active: true });
+    const dashboardTab = tabs[0];
+    if (dashboardTab?.id) {
+      await chrome.tabs.update(dashboardTab.id, { active: true });
     } else {
       await chrome.tabs.create({ url });
     }

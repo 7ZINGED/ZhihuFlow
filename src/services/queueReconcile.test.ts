@@ -49,14 +49,14 @@ describe('队列对账', () => {
   it('processing 一律退回 pending', () => {
     const result = reconcileQueueWithProgress(state([task('a', 'processing')], 'running'), []);
 
-    expect(result.state.tasks[0].status).toBe('pending');
+    expect(result.state.tasks[0]?.status).toBe('pending');
     expect(result.recovered).toBe(0);
   });
 
   it('done 但文章缺字段时保持 done，不自动回退', () => {
     const result = reconcileQueueWithProgress(state([task('a', 'done')]), [{ id: 'a' }]);
 
-    expect(result.state.tasks[0].status).toBe('done');
+    expect(result.state.tasks[0]?.status).toBe('done');
     expect(result.unverified).toBe(1);
     expect(result.recovered).toBe(0);
   });

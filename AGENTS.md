@@ -16,8 +16,9 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 ## Layout
 
 - `entrypoints/` — WXT 入口：`background.ts`、`content.ts`、`dashboard/`、`sidepanel/`
-- `src/views/Dashboard.tsx` — 分拣台主界面（当前承担较多编排逻辑，正在按票拆分）
-- `src/components/` — 文章卡片、设置、自动重分类、队列进度条等
+- `src/views/Dashboard.tsx` — 分拣台主界面：状态持有与编排，UI 已拆到 `components/`、逻辑已拆到 `hooks/`
+- `src/components/` — 文章卡片、设置、自动重分类、队列进度条，以及从 Dashboard 拆出的 `Sidebar`、`FilterBar`、`TagFilterBar`、`BatchActionBar`、`ArticleList`、`QueueStatusPanel`
+- `src/hooks/` — 从 Dashboard 拆出的行为 hook：`useArticleActions`、`useCollectionSync`、`createSingleAnalysis`（单篇分析工厂）
 - `src/services/ai.ts` — OpenAI 兼容客户端、粗读 / 分类 / 精读的编排与结果解析
 - `src/services/aiPrompts.ts` — 三阶段提示词的唯一来源：配置解析 + 消息数组构造（纯函数，模板改动必须过快照）
 - `src/services/aiParse.ts` — 模型响应的纯解析层：围栏、JSON 提取、标签清洗、HTTP 错误文案
@@ -70,7 +71,7 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 
 待补（见 `.scratch/foundation/`）：`formatRawContent`。
 
-类型检查基线：`tsconfig.json` 暂时关闭 `noUncheckedIndexedAccess`。实测恢复后有 37 处错误（`queueEngine.ts` 14、`ai.ts` 8、`queueEngine.test.ts` 5 等），比 Phase 0 记录的 23 处更多——新增模块也带入了数组访问。恢复计划见 `.scratch/foundation/issues/10-restore-index-check.md`。
+类型检查基线：`tsconfig.json` 继承 WXT 的严格配置，`noUncheckedIndexedAccess` 已恢复（ticket 10）。数组访问必须用真实守卫（`if (!x) continue`、`??`），禁止用 `!` 断言绕过。
 
 ## Agent skills
 

@@ -253,6 +253,7 @@ export class QueueEngine {
           if (this.paused) break;
 
           const task = tasks[i];
+          if (!task) continue;
           if (task.status === 'done') continue;
 
           const currentChunkNum = Math.floor(i / chunkSize) + 1;

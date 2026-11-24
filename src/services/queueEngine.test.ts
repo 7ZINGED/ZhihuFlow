@@ -143,8 +143,8 @@ describe('QueueEngine 单篇模式', () => {
 
     const final = await createQueueEngine(deps).run([task('a')], 'quick');
 
-    expect(final.tasks[0].status).toBe('failed');
-    expect(final.tasks[0].error).toBe('文章不存在或已在知乎失效');
+    expect(final.tasks[0]?.status).toBe('failed');
+    expect(final.tasks[0]?.error).toBe('文章不存在或已在知乎失效');
   });
 });
 
@@ -169,9 +169,9 @@ describe('QueueEngine 分类模式', () => {
     expect(chunkSizes).toEqual([2, 2, 1]);
     expect(final.status).toBe('completed');
     expect(updates).toHaveLength(5);
-    expect(updates[0].patch.aiCategory).toBe('技术');
-    expect(updates[0].patch.aiClassifiedAt).toBe(1000);
-    expect(updates[0].patch.tags).toEqual(['#前端架构', '超出的第三个标签']);
+    expect(updates[0]?.patch.aiCategory).toBe('技术');
+    expect(updates[0]?.patch.aiClassifiedAt).toBe(1000);
+    expect(updates[0]?.patch.tags).toEqual(['#前端架构', '超出的第三个标签']);
   });
 
   it('标签池注入到批次请求', async () => {

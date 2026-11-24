@@ -31,12 +31,13 @@ export async function getZhihuHeaders(): Promise<HeadersInit> {
  */
 export async function scrapeCollectionsFromActiveTab(): Promise<ZhihuCollection[]> {
   const tabs = await chrome.tabs.query({ url: '*://www.zhihu.com/*' });
-  if (tabs.length === 0 || !tabs[0].id) {
+  const activeTab = tabs[0];
+  if (!activeTab?.id) {
     throw new Error('未检测到已打开的知乎页面，请先在浏览器任意标签页打开知乎！');
   }
 
   const results = await chrome.scripting.executeScript({
-    target: { tabId: tabs[0].id },
+    target: { tabId: activeTab.id },
     func: () => {
       // 1. 尝试直接从页面 HTML DOM 提取
       const items = document.querySelectorAll('.SelfCollectionItem-innerContainer, .CollectionsItem, .Favlists-item');
@@ -52,11 +53,12 @@ export async function scrapeCollectionsFromActiveTab(): Promise<ZhihuCollection[
             const match = url.match(/\/collection\/(\d+)/);
             if (match) {
               const id = match[1];
+              if (!id) return;
               const title = titleEl.textContent?.trim() || '未命名收藏夹';
               let count = 0;
               if (metaEl) {
                 const countMatch = metaEl.textContent?.match(/(\d+)\s*条内容/);
-                if (countMatch) count = parseInt(countMatch[1], 10);
+                if (countMatch?.[1]) count = parseInt(countMatch[1], 10);
               }
               list.push({
                 id,

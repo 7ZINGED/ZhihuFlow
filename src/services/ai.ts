@@ -272,6 +272,7 @@ export async function batchCategorizeArticlesWithAI(
   // 若只有 1 篇，直接调用单篇打标接口
   if (articles.length === 1) {
     const single = articles[0];
+    if (!single) return resultMap;
     const res = await categorizeArticleWithAI(single, targetCollections, {
       batchTaxonomy: options.batchTaxonomy,
       maxTagCount: options.maxTagCount,
@@ -302,13 +303,14 @@ export async function batchCategorizeArticlesWithAI(
     if (Array.isArray(parsed)) {
       for (let i = 0; i < articles.length; i++) {
         const art = articles[i];
+        if (!art) continue;
         const item = parsed.find((p: any) => p && String(p.id).trim() === art.id) || parsed[i];
         if (item) {
           const cleanTags = normalizeTags(item.tags, maxTagCount);
 
           resultMap.set(art.id, {
             id: art.id,
-            tags: cleanTags.length > 0 ? cleanTags : (batchTaxonomy.length > 0 ? [batchTaxonomy[0]] : ['未归类']),
+            tags: cleanTags.length > 0 ? cleanTags : (batchTaxonomy.length > 0 ? [batchTaxonomy[0] ?? '未归类'] : ['未归类']),
             recommendedCategory: item.recommendedCategory || '默认',
             categorizeReason: item.categorizeReason || 'AI整批聚类匹配',
             summary: allowModifyDescription ? item.summary?.trim() : undefined,
@@ -340,7 +342,7 @@ export async function batchCategorizeArticlesWithAI(
       } catch {
         resultMap.set(art.id, {
           id: art.id,
-          tags: batchTaxonomy.length > 0 ? [batchTaxonomy[0]] : ['未归类'],
+          tags: batchTaxonomy.length > 0 ? [batchTaxonomy[0] ?? '未归类'] : ['未归类'],
           recommendedCategory: '默认',
           categorizeReason: 'AI打标完成',
         });

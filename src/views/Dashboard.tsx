@@ -39,6 +39,15 @@ import { SettingsModal } from '../components/SettingsModal';
 import { DescriptionModal } from '../components/DescriptionModal';
 import { AutoOrganizeModal } from '../components/AutoOrganizeModal';
 import { AIQueueBar } from '../components/AIQueueBar';
+import { QueueStatusPanel } from '../components/QueueStatusPanel';
+import { FilterBar } from '../components/FilterBar';
+import { TagFilterBar } from '../components/TagFilterBar';
+import { BatchActionBar } from '../components/BatchActionBar';
+import { Sidebar } from '../components/Sidebar';
+import { ArticleList } from '../components/ArticleList';
+import { useArticleActions, type HistoryRecord } from '../hooks/useArticleActions';
+import { createSingleAnalysis } from '../hooks/useSingleAnalysis';
+import { useCollectionSync } from '../hooks/useCollectionSync';
 import { 
   type AIQueueState, 
   type AIQueueTask, 
@@ -70,13 +79,6 @@ import {
 } from '../services/ai';
 import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
-interface HistoryRecord {
-  article: ZhihuArticleItem;
-  fromCollectionId: string;
-  toCollectionId?: string;
-  action: 'move' | 'delete' | 'trash';
-  undone?: boolean;
-}
 
 export const Dashboard: React.FC = () => {
   // 选中的导航目标: 'all' | 收藏夹ID | '__trash__' (回收站/已出分拣范围)
@@ -214,141 +216,6 @@ export const Dashboard: React.FC = () => {
 
   const isTrashView = selectedCollectionId === '__trash__';
 
-  const handleSyncCollections = async () => {
-    setLoading(true);
-    setSyncProgress('正在同步知乎收藏夹列表...');
-    try {
-      const list = await fetchUserCollectionsList();
-      if (!list || list.length === 0) {
-        showToast('⚠️ 未能从知乎获取到收藏夹列表，请确认是否已在浏览器中登录知乎');
-        return;
-      }
-      
-      // 1. 获取本地既有收藏夹列表，找出远端已被物理删除的失效收藏夹
-      const localCols = await db.collections.toArray();
-      const remoteIds = new Set(list.map((c) => c.id));
-      const deletedCols = localCols.filter((c) => !remoteIds.has(c.id));
-
-      if (deletedCols.length > 0) {
-        const deletedIds = deletedCols.map((c) => c.id);
-        // 从本地数据库清理已被删除的收藏夹元数据
-        await db.collections.bulkDelete(deletedIds);
-
-        // 如果当前高亮查看的收藏夹恰好被删除，安全回退到“全部”
-        if (deletedIds.includes(selectedCollectionId)) {
-          setSelectedCollectionId('all');
-        }
-
-        // 绝不物理删除文章！用户的阅读记录、标签、金句是宝贵资产，
-        // 将原属于被删收藏夹的文章标记为移入回收站保护起来，避免悬空
-        for (const delId of deletedIds) {
-          const orphanArticles = await db.articles.where('collectionId').equals(delId).toArray();
-          for (const art of orphanArticles) {
-            await db.articles.update(art.id, {
-              collectionTitle: '（已解散收藏夹）',
-              inTrash: true,
-              trashedAt: Date.now(),
-            });
-          }
-        }
-      }
-
-      // 2. 将远端最新的有效收藏夹列表写入本地
-      for (const col of list) {
-        const localCount = await db.articles.where('collectionId').equals(col.id).count();
-        if (localCount > 0 && (!col.itemCount || col.itemCount === 0)) {
-          col.itemCount = localCount;
-        }
-      }
-      await db.collections.bulkPut(list);
-
-      if (deletedCols.length > 0) {
-        showToast(`✅ 收藏夹目录已同步！已自动移除 ${deletedCols.length} 个知乎端已注销的收藏夹，其文章已移入回收站保护。`);
-      } else {
-        showToast(`✅ 收藏夹目录已与知乎最新状态同步！`);
-      }
-    } catch (err: any) {
-      console.error(err);
-      setSyncProgress(`同步失败: ${err.message}`);
-    } finally {
-      setLoading(false);
-      setSyncProgress('');
-    }
-  };
-
-  // 同步抓取选中收藏夹中的内容 (增量安全合并，完整保留本地AI分析与用户标记状态)
-  const handleFetchArticles = async (collectionId: string) => {
-    const col = collections.find((c) => c.id === collectionId);
-    if (!col) return;
-
-    setLoading(true);
-    setSyncProgress(`正在读取「${col.title}」内容...`);
-    try {
-      const { items, complete } = await fetchCollectionContentsDetailed(collectionId, col.title, (count) => {
-        setSyncProgress(`已抓取 ${count} 条内容...`);
-      });
-      await safeUpsertArticles(items);
-
-      // ticket 14：成员关系消失的行移入回收站（可恢复、不删 AI 产物）。
-      // 只有抓取完整才敢做差集——备用接口 / 分页中断时不处理，避免误伤未抓到的正常成员。
-      let trashed = 0;
-      if (complete) {
-        const localRows = await db.articles.where('collectionId').equals(collectionId).toArray();
-        const remoteIds = new Set(items.map((a) => a.id));
-        const vanishedIds = findVanishedMemberIds(localRows, remoteIds, collectionId);
-        if (vanishedIds.length > 0) {
-          const trashedAt = Date.now();
-          await db.articles.bulkUpdate(
-            vanishedIds.map((key) => ({ key, changes: { inTrash: true, trashedAt } }))
-          );
-          trashed = vanishedIds.length;
-        }
-      }
-
-      const actualCount = await db.articles.where('collectionId').equals(collectionId).count();
-      await db.collections.update(collectionId, { itemCount: actualCount });
-      const tail = trashed > 0
-        ? `，${trashed} 篇已不在知乎端，已移入回收站（可恢复）`
-        : complete ? '' : '（抓取未完整，本次跳过成员失效检查）';
-      showToast(`✅ 成功同步「${col.title}」最新内容，已完整保留已有粗读与标签数据${tail}！`);
-    } catch (err: any) {
-      alert(`读取收藏夹失败: ${err.message}`);
-    } finally {
-      setLoading(false);
-      setSyncProgress('');
-    }
-  };
-
-  // 一键为收藏夹生成 AI 简介
-  const handleGenerateDesc = async (col: ZhihuCollection) => {
-    setLoading(true);
-    setSyncProgress(`正在分析「${col.title}」并提炼宏观简介...`);
-    try {
-      let colArticles = await db.articles.where('collectionId').equals(col.id).toArray();
-      if (colArticles.length === 0) {
-        colArticles = await fetchCollectionContents(col.id, col.title);
-        await safeUpsertArticles(colArticles);
-      }
-
-      if (colArticles.length === 0) {
-        alert('当前收藏夹为空，无法生成简介');
-        return;
-      }
-
-      const generated = await generateCollectionDescription(colArticles);
-      setDescModalData({
-        isOpen: true,
-        colId: col.id,
-        colTitle: col.title,
-        desc: generated,
-      });
-    } catch (e: any) {
-      alert(`生成简介失败: ${e.message}`);
-    } finally {
-      setLoading(false);
-      setSyncProgress('');
-    }
-  };
 
   // 过滤展示的列表 (考虑回收站与分拣区)
   const currentPool = isTrashView ? trashedArticles : activeArticles;
@@ -391,7 +258,7 @@ export const Dashboard: React.FC = () => {
     });
   });
   const availableTags = Object.keys(tagFrequency).sort(
-    (a, b) => tagFrequency[b] - tagFrequency[a]
+    (a, b) => (tagFrequency[b] ?? 0) - (tagFrequency[a] ?? 0)
   );
 
   // 全选/反选
@@ -435,91 +302,7 @@ export const Dashboard: React.FC = () => {
   };
 
   // 递进式 AI 处理：Stage 1 粗读初筛 / Stage 2 词条分类(受设置控制) / Stage 3 深度精读(+热评Top5)
-  const handleAnalyzeSingle = async (
-    article: ZhihuArticleItem,
-    mode: 'quick' | 'categorize' | 'deep' = 'quick',
-    batchTaxonomy?: string[]
-  ) => {
-    if (mode === 'quick') {
-      const res = await quickTriageArticleWithAI(article);
-      // ADR-0005：AI 产物属于内容，同 contentId 的其他成员只补空、不覆盖
-      await applyAIResult(article.id, {
-        aiSummary: res.summary,
-        aiKeyTakeaways: res.keyTakeaways,
-        aiTriageRating: res.triageRating,
-        aiTriageReason: res.triageReason,
-        aiReadingMode: 'quick',
-        isTruncated: res.isTruncated,
-        totalWordCount: res.totalWordCount,
-        aiProcessedAt: Date.now(),
-      });
-    } else if (mode === 'categorize') {
-      const settings = await getAISettings();
-      const maxTagCount = settings.maxTagCount || 2;
-      const allowModifyTags = settings.allowModifyTags ?? true;
-      const allowModifyDescription = settings.allowModifyDescription ?? true;
-
-      // 如果用户在设置中关闭了“允许AI覆盖已有标签”，且文章已有标签，则保留既有标签
-      const shouldKeepExistingTags = !allowModifyTags && article.tags && article.tags.length > 0;
-
-      // 提炼当前库中高频标签池 (Top 30)，引导 AI 优先收敛复用已有标签，杜绝标签泛滥膨胀
-      const tagCounts: Record<string, number> = {};
-      activeArticles.forEach((a) => {
-        (a.tags || []).forEach((t) => {
-          tagCounts[t] = (tagCounts[t] || 0) + 1;
-        });
-      });
-      const existingTags = Object.entries(tagCounts)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 30)
-        .map(([t]) => t);
-
-      const res = await categorizeArticleWithAI(article, collections, { 
-        existingTags,
-        batchTaxonomy,
-        maxTagCount,
-        allowModifyDescription,
-      });
-
-      const updateData: Partial<ZhihuArticleItem> = {
-        aiCategory: res.recommendedCategory,
-        aiCategoryReason: res.categorizeReason,
-        aiClassifiedAt: Date.now(),
-      };
-
-      if (!shouldKeepExistingTags) {
-        // 完全按照最新 AI 词条打标调整标签数 (严格限制为 1 ~ maxTagCount 个)
-        updateData.tags = res.tags.slice(0, maxTagCount);
-      }
-
-      if (allowModifyDescription && res.summary) {
-        updateData.aiSummary = res.summary;
-      }
-
-      await applyAIResult(article.id, updateData);
-    } else if (mode === 'deep') {
-      let hotComments = article.hotComments || [];
-      if (!hotComments || hotComments.length === 0) {
-        try {
-          hotComments = await fetchHotComments(article.contentId, article.contentType);
-        } catch (err) {
-          console.warn('获取热评失败:', err);
-        }
-      }
-
-      const res = await deepReadArticleWithAI(article, hotComments);
-      await applyAIResult(article.id, {
-        aiSummary: res.summary,
-        aiKeyTakeaways: res.keyTakeaways,
-        aiCommentsInsight: res.commentsInsight,
-        hotComments: res.hotComments || article.hotComments,
-        aiReadingMode: 'deep',
-        isTruncated: false,
-        totalWordCount: res.totalWordCount || (article.fullContent || article.title).length,
-        aiDeepReadAt: Date.now(),
-      });
-    }
-  };
+  const handleAnalyzeSingle = createSingleAnalysis({ collections, activeArticles });
 
   // 核心队列执行器：逐篇处理任务，支持实时暂停、取消与异常容错
   // 核心队列执行器：分片 / 暂停 / 熔断由 queueEngine 承担，UI 只同步状态与生命周期
@@ -806,169 +589,6 @@ export const Dashboard: React.FC = () => {
     runQueueLoop(updatedTasks, queueState.mode);
   };
 
-  // 批量移动 (记录历史用于撤销)
-  const handleBatchMove = async (targetColId: string) => {
-    const targetCol = collections.find((c) => c.id === targetColId);
-    if (!targetCol) return;
-
-    const targets = filteredArticles.filter((a) => selectedIds.has(a.id) && !a.isDeletedOrInvalid);
-    if (targets.length === 0) return;
-
-    if (!confirm(`确定将选中的 ${targets.length} 篇内容移动到「${targetCol.title}」吗？`)) return;
-
-    setLoading(true);
-    let count = 0;
-    const newRecords: HistoryRecord[] = [];
-
-    for (const item of targets) {
-      setSyncProgress(`正在移动 (${++count}/${targets.length})...`);
-      try {
-        await moveArticleBetweenCollections(item.contentId, item.contentType, item.collectionId, targetColId);
-        await db.articles.delete(item.id);
-        newRecords.push({
-          article: item,
-          fromCollectionId: item.collectionId,
-          toCollectionId: targetColId,
-          action: 'move',
-        });
-      } catch (err) {
-        console.error(err);
-      }
-    }
-    setHistoryList((prev) => [...newRecords, ...prev].slice(0, 50));
-    setSelectedIds(new Set());
-    setLoading(false);
-    setSyncProgress('');
-  };
-
-  // 单篇移出分拣范围 (放入回收站，不直接删除知乎线上)
-  const handleMoveToTrashSingle = async (article: ZhihuArticleItem) => {
-    await db.articles.update(article.id, { inTrash: true, trashedAt: Date.now() });
-    setHistoryList((prev) => [
-      {
-        article,
-        fromCollectionId: article.collectionId,
-        action: 'trash',
-      },
-      ...prev,
-    ]);
-    showToast(`已将「${article.title.slice(0, 14)}...」移出分拣范围 (已放入回收站)`);
-  };
-
-  // 批量移出分拣范围 (放入回收站)
-  const handleBatchMoveToTrash = async () => {
-    const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
-    if (targets.length === 0) return;
-
-    const newRecords: HistoryRecord[] = [];
-    for (const item of targets) {
-      await db.articles.update(item.id, { inTrash: true, trashedAt: Date.now() });
-      newRecords.push({
-        article: item,
-        fromCollectionId: item.collectionId,
-        action: 'trash',
-      });
-    }
-
-    setHistoryList((prev) => [...newRecords, ...prev].slice(0, 50));
-    setSelectedIds(new Set());
-    showToast(`已将选中的 ${targets.length} 篇内容放入回收站（已移出分拣范围）`);
-  };
-
-  // 单篇从回收站恢复
-  const handleRestoreSingle = async (article: ZhihuArticleItem) => {
-    await db.articles.update(article.id, { inTrash: false });
-    showToast(`已将「${article.title.slice(0, 14)}...」恢复至分拣台`);
-  };
-
-  // 批量从回收站恢复
-  const handleBatchRestore = async () => {
-    const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
-    if (targets.length === 0) return;
-
-    for (const item of targets) {
-      await db.articles.update(item.id, { inTrash: false });
-    }
-    setSelectedIds(new Set());
-    showToast(`已将 ${targets.length} 篇内容恢复至分拣台`);
-  };
-
-  // 单篇彻底从知乎线上取消收藏
-  const handlePermanentDeleteSingle = async (article: ZhihuArticleItem) => {
-    if (!confirm(`⚠️ 确定要彻底从知乎线上取消收藏「${article.title}」吗？此操作不可逆！`)) return;
-
-    setLoading(true);
-    try {
-      if (!article.isDeletedOrInvalid) {
-        await removeArticleFromCollection(article.contentId, article.contentType, article.collectionId);
-      }
-      await db.articles.delete(article.id);
-      showToast(`已从知乎线上彻底取消收藏`);
-    } catch (e: any) {
-      alert(`彻底删除失败: ${e.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // 批量彻底从知乎线上删除 (清空选中回收站)
-  const handleBatchPermanentDelete = async () => {
-    const targets = filteredArticles.filter((a) => selectedIds.has(a.id));
-    if (targets.length === 0) return;
-
-    if (!confirm(`⚠️ 危险警告：确定将选中的 ${targets.length} 条内容彻底从知乎线上取消收藏吗？此操作将在线上删除！`)) return;
-
-    setLoading(true);
-    let count = 0;
-    for (const item of targets) {
-      setSyncProgress(`正在从知乎线上彻底删除 (${++count}/${targets.length})...`);
-      try {
-        if (!item.isDeletedOrInvalid) {
-          await removeArticleFromCollection(item.contentId, item.contentType, item.collectionId);
-        }
-        await db.articles.delete(item.id);
-      } catch (err) {
-        console.error(err);
-      }
-    }
-    setSelectedIds(new Set());
-    setLoading(false);
-    setSyncProgress('');
-    showToast(`已成功从知乎线上彻底删除 ${count} 条内容！`);
-  };
-
-  // 一键撤销最近的操作 (支持移动撤销与回收站撤销)
-  const handleUndoRecent = async () => {
-    const lastActive = historyList.find((h) => !h.undone);
-    if (!lastActive) return;
-
-    setLoading(true);
-    try {
-      if (lastActive.action === 'trash') {
-        await db.articles.update(lastActive.article.id, { inTrash: false });
-        lastActive.undone = true;
-        setHistoryList([...historyList]);
-        showToast(`已撤销！「${lastActive.article.title.slice(0, 14)}...」已恢复至分拣台`);
-      } else if (lastActive.action === 'move' && lastActive.toCollectionId) {
-        setSyncProgress(`正在撤销移动:「${lastActive.article.title.slice(0, 15)}...」`);
-        await moveArticleBetweenCollections(
-          lastActive.article.contentId,
-          lastActive.article.contentType,
-          lastActive.toCollectionId,
-          lastActive.fromCollectionId
-        );
-        await db.articles.put(lastActive.article);
-        lastActive.undone = true;
-        setHistoryList([...historyList]);
-        showToast(`已撤销移动！「${lastActive.article.title.slice(0, 14)}...」已移回原收藏夹`);
-      }
-    } catch (e: any) {
-      alert(`撤销失败: ${e.message}`);
-    } finally {
-      setLoading(false);
-      setSyncProgress('');
-    }
-  };
 
   const showToast = (text: string) => {
     setToastMsg({ text });
@@ -976,6 +596,19 @@ export const Dashboard: React.FC = () => {
       setToastMsg((prev) => (prev?.text === text ? null : prev));
     }, 4500);
   };
+  const { handleSyncCollections, handleFetchArticles, handleGenerateDesc } = useCollectionSync({
+    collections, selectedCollectionId, setSelectedCollectionId, setLoading,
+    setSyncProgress, showToast, setDescModalData,
+  });
+
+  const {
+    handleBatchMove, handleMoveToTrashSingle, handleBatchMoveToTrash,
+    handleRestoreSingle, handleBatchRestore, handlePermanentDeleteSingle,
+    handleBatchPermanentDelete, handleUndoRecent,
+  } = useArticleActions({
+    collections, filteredArticles, selectedIds, historyList, setHistoryList,
+    setSelectedIds, setLoading, setSyncProgress, showToast,
+  });
 
   const handleClearLocalCache = async () => {
     if (confirm('确定清空本地缓存的知乎文章和 AI 分析结果吗？（不影响知乎线上的收藏夹）')) {
@@ -994,506 +627,53 @@ export const Dashboard: React.FC = () => {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors duration-200">
-      {/* 左侧收藏夹与分拣导航 */}
-      <div className="glass-panel w-72 shrink-0 flex flex-col justify-between border-r border-slate-200/80 dark:border-slate-800 p-4">
-        <div className="space-y-4">
-          {/* Logo 区域与工具 */}
-          <div className="flex items-center justify-between pb-3 border-b border-slate-200/60 dark:border-slate-800">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md shadow-blue-500/20">
-                <Sparkles className="w-4 h-4" />
-              </div>
-              <div>
-                <h1 className="font-bold text-sm tracking-tight text-slate-900 dark:text-slate-100 leading-none">
-                  知流 · ZhihuFlow
-                </h1>
-                <span className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold">知乎摘读与分拣台</span>
-              </div>
-            </div>
-            
-            <div className="flex items-center gap-1">
-              <button
-                onClick={() => setIsDark(!isDark)}
-                className="p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition"
-                title={isDark ? '切换亮色模式' : '切换暗黑模式'}
-              >
-                {isDark ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4" />}
-              </button>
-
-              <button
-                onClick={() => setIsSettingsOpen(true)}
-                className="p-1.5 rounded-xl hover:bg-slate-200/60 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition"
-                title="大模型接口设置"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          {/* 状态统计迷你卡片 (值得留 / 可清理 / 不确定) */}
-          <div className="grid grid-cols-4 gap-1 p-2 rounded-2xl bg-white/70 dark:bg-slate-900/60 border border-slate-100 dark:border-slate-800 text-center text-xs">
-            <div className="p-1.5 rounded-xl bg-slate-50 dark:bg-slate-800/60">
-              <span className="block text-[11px] text-slate-400 dark:text-slate-500">总计</span>
-              <span className="font-bold text-slate-800 dark:text-slate-200 text-xs">{totalCount}</span>
-            </div>
-            <div className="p-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40">
-              <span className="block text-[11px] text-emerald-600 dark:text-emerald-400">值得留</span>
-              <span className="font-bold text-emerald-700 dark:text-emerald-300 text-xs">{keepCount}</span>
-            </div>
-            <div className="p-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/40">
-              <span className="block text-[11px] text-rose-600 dark:text-rose-400">可清理</span>
-              <span className="font-bold text-rose-700 dark:text-rose-300 text-xs">{discardCount}</span>
-            </div>
-            <div className="p-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/40">
-              <span className="block text-[11px] text-amber-600 dark:text-amber-400">不确定</span>
-              <span className="font-bold text-amber-700 dark:text-amber-300 text-xs">{reviewCount}</span>
-            </div>
-          </div>
-
-          {/* 左侧常驻全局 AI 分拣任务面板 (MoonDigest 风格常驻看板，零遮挡) */}
-          {queueState.status !== 'idle' && queueState.tasks.length > 0 && (
-            <div className="p-3 rounded-2xl bg-gradient-to-br from-blue-50/80 to-indigo-50/60 dark:from-blue-950/40 dark:to-indigo-950/30 border border-blue-200/60 dark:border-blue-900/40 space-y-2.5 animate-fade-in shadow-sm">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {queueState.status === 'running' ? (
-                    <Loader2 className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 animate-spin shrink-0" />
-                  ) : queueState.status === 'paused' ? (
-                    <Pause className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                  ) : queueState.tasks.some((t) => t.status === 'failed') ? (
-                    <AlertCircle className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                  ) : (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                  )}
-                  <span className="font-bold text-xs text-slate-800 dark:text-slate-100 truncate">
-                    {queueState.status === 'running' 
-                      ? 'AI 读取分拣中' 
-                      : queueState.status === 'paused' 
-                      ? '队列已暂停' 
-                      : queueState.tasks.some((t) => t.status === 'failed')
-                      ? queueState.tasks.every((t) => t.status === 'failed')
-                        ? '全部执行失败'
-                        : '完成(含异常)'
-                      : '分拣完成'}
-                  </span>
-                </div>
-
-                <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100/70 dark:bg-blue-900/60 text-blue-700 dark:text-blue-300">
-                  {queueState.mode === 'deep' ? '精读' : queueState.mode === 'categorize' ? '分类' : '粗读'}
-                </span>
-              </div>
-
-              {/* 平滑微型进度条 */}
-              <div className="space-y-1">
-                <div className="h-1.5 w-full bg-blue-200/50 dark:bg-slate-800 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      queueState.status === 'completed'
-                        ? queueState.tasks.some((t) => t.status === 'failed')
-                          ? queueState.tasks.every((t) => t.status === 'failed')
-                            ? 'bg-rose-500'
-                            : 'bg-amber-500'
-                          : 'bg-emerald-500'
-                        : queueState.status === 'paused'
-                        ? 'bg-amber-500'
-                        : 'bg-blue-600 animate-pulse'
-                    }`}
-                    style={{
-                      width: `${Math.round(
-                        ((queueState.tasks.filter((t) => t.status === 'done' || t.status === 'failed').length) /
-                          queueState.tasks.length) *
-                          100
-                      )}%`,
-                    }}
-                  />
-                </div>
-                <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400">
-                  <span>
-                    已完成 {queueState.tasks.filter((t) => t.status === 'done').length} / {queueState.tasks.length} 篇
-                    {queueState.tasks.some((t) => t.status === 'failed') && (
-                      <span className="text-rose-500 ml-1">· {queueState.tasks.filter((t) => t.status === 'failed').length} 篇异常</span>
-                    )}
-                  </span>
-                  <span>
-                    {Math.round(
-                      ((queueState.tasks.filter((t) => t.status === 'done' || t.status === 'failed').length) /
-                        queueState.tasks.length) *
-                        100
-                    )}%
-                  </span>
-                </div>
-              </div>
-
-              {/* 当前分析标题 */}
-              {queueState.currentTitle && (
-                <p className="text-[10px] text-slate-600 dark:text-slate-400 truncate italic">
-                  正在读: {queueState.currentTitle}
-                </p>
-              )}
-
-              {/* 快捷操作按钮组 */}
-              <div className="flex items-center gap-1.5 pt-0.5">
-                {queueState.status === 'running' && (
-                  <button
-                    onClick={handlePauseQueue}
-                    className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg bg-amber-500 text-white hover:bg-amber-600 text-[11px] font-semibold shadow-sm transition"
-                  >
-                    <Pause className="w-3 h-3" />
-                    <span>暂停任务</span>
-                  </button>
-                )}
-
-                {queueState.status === 'paused' && (
-                  <>
-                    <button
-                      onClick={handleResumeQueue}
-                      className="flex-1 flex items-center justify-center gap-1 py-1 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-[11px] font-semibold shadow-sm transition"
-                    >
-                      <Play className="w-3 h-3 fill-current" />
-                      <span>继续分析</span>
-                    </button>
-                    <button
-                      onClick={handleClearQueue}
-                      className="p-1 rounded-lg text-slate-400 hover:text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/30 transition"
-                      title="清空队列"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </>
-                )}
-
-                {queueState.status === 'completed' && (
-                  queueState.tasks.some((t) => t.status === 'failed') ? (
-                    <div className="flex items-center gap-1 w-full">
-                      <button
-                        onClick={handleRetryFailed}
-                        className="flex-1 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold flex items-center justify-center gap-1 shadow-sm transition"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        <span>重试失败项 ({queueState.tasks.filter((t) => t.status === 'failed').length})</span>
-                      </button>
-                      <button
-                        onClick={handleClearQueue}
-                        className="p-1 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
-                        title="关闭任务"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={handleClearQueue}
-                      className="flex-1 py-1 rounded-lg bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-semibold"
-                    >
-                      ✓ 全部完成 (点击关闭)
-                    </button>
-                  )
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* AI 智能一键整理主按钮 */}
-          <button
-            onClick={() => setIsAutoOrganizeOpen(true)}
-            className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-semibold text-xs shadow-md shadow-blue-500/20 transition transform active:scale-95"
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>AI 一键整理与重分类</span>
-          </button>
-
-          {/* 收藏夹与回收站列表 */}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between px-2 text-xs font-semibold text-slate-400 dark:text-slate-500 uppercase tracking-wider">
-              <span>知乎收藏夹</span>
-              <button
-                onClick={handleSyncCollections}
-                className="hover:text-blue-600 dark:hover:text-blue-400 transition"
-                title="重新刷新收藏夹列表"
-              >
-                <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} />
-              </button>
-            </div>
-
-            <div className="max-h-[34vh] overflow-y-auto space-y-0.5 pr-1">
-              <button
-                onClick={() => setSelectedCollectionId('all')}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition ${
-                  selectedCollectionId === 'all'
-                    ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
-                    : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                }`}
-              >
-                <span className="flex items-center gap-2 truncate">
-                  <Archive className="w-3.5 h-3.5" /> 全部待分拣内容
-                </span>
-                <span className="text-[11px] opacity-75">{activeArticles.length}</span>
-              </button>
-
-              {collections.map((col) => (
-                <div
-                  key={col.id}
-                  className={`group flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition cursor-pointer ${
-                    selectedCollectionId === col.id
-                      ? 'bg-blue-600 text-white shadow-sm shadow-blue-600/30'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                  onClick={() => setSelectedCollectionId(col.id)}
-                >
-                  <span className="truncate flex-1" title={col.title}>
-                    {col.title}
-                  </span>
-                  
-                  <div className="flex items-center gap-1 shrink-0">
-                    <span className="text-[11px] opacity-75 mr-1">{col.itemCount || 0}</span>
-                    
-                    {/* 一键 AI 生成描述 */}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleGenerateDesc(col);
-                      }}
-                      className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-black/10 dark:hover:bg-white/10 text-slate-400 hover:text-amber-500 transition"
-                      title="AI 为本收藏夹生成简介"
-                    >
-                      <FileText className="w-3 h-3" />
-                    </button>
-
-                    {/* 拉取同步 */}
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleFetchArticles(col.id);
-                      }}
-                      className="p-1 rounded bg-slate-100 hover:bg-blue-100 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 transition"
-                      title="从知乎拉取最新内容"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            {/* 已移出分拣范围 / 回收站区域 */}
-            <div className="pt-2 border-t border-slate-100 dark:border-slate-800/80">
-              <button
-                onClick={() => setSelectedCollectionId('__trash__')}
-                className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition ${
-                  selectedCollectionId === '__trash__'
-                    ? 'bg-rose-600 text-white shadow-sm shadow-rose-600/30'
-                    : 'text-slate-500 dark:text-slate-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 hover:text-rose-600 dark:hover:text-rose-400'
-                }`}
-              >
-                <span className="flex items-center gap-2 truncate">
-                  <Trash2 className="w-3.5 h-3.5" /> 已移出分拣 (回收站)
-                </span>
-                <span className={`text-[11px] px-2 py-0.5 rounded-full ${
-                  trashedArticles.length > 0 
-                    ? selectedCollectionId === '__trash__' 
-                      ? 'bg-white/20 text-white' 
-                      : 'bg-rose-100 dark:bg-rose-950/80 text-rose-600 dark:text-rose-400 font-bold' 
-                    : 'opacity-60'
-                }`}>
-                  {trashedArticles.length}
-                </span>
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* 底部撤销与清空 */}
-        <div className="pt-3 border-t border-slate-200/60 dark:border-slate-800 space-y-2 text-xs">
-          {canUndo && (
-            <button
-              onClick={handleUndoRecent}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/60 transition font-medium"
-            >
-              <Undo2 className="w-3.5 h-3.5" /> 撤销上一次操作
-            </button>
-          )}
-
-          {/* 数据备份与恢复快捷操作 */}
-          <div className="grid grid-cols-2 gap-1.5 pt-1">
-            <button
-              onClick={handleExportBackup}
-              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition text-[11px] font-medium"
-              title="导出当前全部数据为 JSON 文件进行安全冷备份"
-            >
-              <Download className="w-3 h-3 text-blue-500" />
-              <span>数据导出</span>
-            </button>
-
-            <button
-              onClick={() => sidebarFileInputRef.current?.click()}
-              className="flex items-center justify-center gap-1 py-1.5 px-2 rounded-lg bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition text-[11px] font-medium"
-              title="从 JSON 备份文件还原全量数据"
-            >
-              <Upload className="w-3 h-3 text-emerald-500" />
-              <span>数据导入</span>
-            </button>
-            <input
-              ref={sidebarFileInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleSidebarFileChange}
-              className="hidden"
-            />
-          </div>
-
-          <button
-            onClick={handleClearLocalCache}
-            className="w-full text-center px-2 py-1 rounded-lg text-slate-400 dark:text-slate-500 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/20 transition text-[11px]"
-          >
-            清空本地缓存
-          </button>
-        </div>
-      </div>
+      <Sidebar
+        activeArticles={activeArticles}
+        trashedArticles={trashedArticles}
+        collections={collections}
+        selectedCollectionId={selectedCollectionId}
+        queueState={queueState}
+        isDark={isDark}
+        canUndo={canUndo}
+        loading={loading}
+        sidebarFileInputRef={sidebarFileInputRef}
+        onSelectCollection={setSelectedCollectionId}
+        onSetDark={setIsDark}
+        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenAutoOrganize={() => setIsAutoOrganizeOpen(true)}
+        onPauseQueue={handlePauseQueue}
+        onResumeQueue={handleResumeQueue}
+        onClearQueue={handleClearQueue}
+        onRetryFailed={handleRetryFailed}
+        onSyncCollections={handleSyncCollections}
+        onFetchArticles={handleFetchArticles}
+        onGenerateDesc={handleGenerateDesc}
+        onUndoRecent={handleUndoRecent}
+        onExportBackup={handleExportBackup}
+        onSidebarFileChange={handleSidebarFileChange}
+        onClearLocalCache={handleClearLocalCache}
+      />
 
       {/* 右侧主视窗：分拣台与卡片流 */}
       <div className="flex-1 flex flex-col h-full overflow-hidden">
-        {/* 顶部搜索与筛选栏 */}
-        <div className="glass-panel shrink-0 border-b border-slate-200/80 dark:border-slate-800 px-6 py-3.5 flex items-center justify-between gap-4">
-          <div className="relative flex-1 max-w-md">
-            <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400 dark:text-slate-500" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="搜索标题、作者、AI核心观点、标签..."
-              className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white/80 dark:bg-slate-900/80 text-xs text-slate-800 dark:text-slate-100"
-            />
-          </div>
-
-          {/* 状态筛选药丸标签 (全部 / 待粗读 / 值得留 / 可清理 / 不确定 / 未打标 / 已失效) */}
-          <div className="flex items-center gap-1.5 bg-slate-100/80 dark:bg-slate-900/80 p-1 rounded-xl text-xs flex-wrap">
-            <button
-              onClick={() => setFilterRating('all')}
-              className={`px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'all'
-                  ? 'bg-white dark:bg-slate-800 shadow-sm text-slate-900 dark:text-slate-100'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'
-              }`}
-            >
-              全部 ({currentPool.length})
-            </button>
-            <button
-              onClick={() => setFilterRating('untriaged')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'untriaged'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-blue-600'
-              }`}
-              title="尚未经过 AI 快速粗读评级的内容"
-            >
-              <Clock className="w-3 h-3" />
-              待粗读 ({currentPool.filter((a) => !a.aiTriageRating && !a.isDeletedOrInvalid).length})
-            </button>
-            <button
-              onClick={() => setFilterRating('keep')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'keep' ? 'bg-emerald-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-emerald-600'
-              }`}
-            >
-              <CheckCircle2 className="w-3 h-3" />
-              值得留 ({currentPool.filter((a) => a.aiTriageRating === 'keep').length})
-            </button>
-            <button
-              onClick={() => setFilterRating('discard')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'discard' ? 'bg-rose-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-rose-600'
-              }`}
-            >
-              <XCircle className="w-3 h-3" />
-              可清理 ({currentPool.filter((a) => a.aiTriageRating === 'discard').length})
-            </button>
-            <button
-              onClick={() => setFilterRating('review')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'review' ? 'bg-amber-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-amber-600'
-              }`}
-            >
-              <HelpCircle className="w-3 h-3" />
-              不确定 ({currentPool.filter((a) => a.aiTriageRating === 'review').length})
-            </button>
-            <button
-              onClick={() => setFilterRating('uncategorized')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'uncategorized'
-                  ? 'bg-indigo-600 text-white shadow-sm'
-                  : 'text-slate-500 dark:text-slate-400 hover:text-indigo-600'
-              }`}
-              title="尚未打上 AI 词条分类标签的内容"
-            >
-              <Tag className="w-3 h-3" />
-              未打标 ({currentPool.filter((a) => (!a.tags || a.tags.length === 0) && !a.isDeletedOrInvalid).length})
-            </button>
-            <button
-              onClick={() => setFilterRating('invalid')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-lg font-medium transition ${
-                filterRating === 'invalid' ? 'bg-red-500 text-white shadow-sm' : 'text-slate-500 dark:text-slate-400 hover:text-red-600'
-              }`}
-            >
-              <AlertTriangle className="w-3 h-3" />
-              已失效 ({currentPool.filter((a) => a.isDeletedOrInvalid).length})
-            </button>
-          </div>
-        </div>
+        <FilterBar
+          searchQuery={searchQuery}
+          onSearchChange={setSearchQuery}
+          filterRating={filterRating}
+          onRatingChange={setFilterRating}
+          currentPool={currentPool}
+        />
 
         {/* 标签过滤与全局收敛管理栏 (当有标签存在时显示) */}
-        {availableTags.length > 0 && !isTrashView && (
-          <div className="px-6 py-2 bg-slate-50/80 dark:bg-slate-900/40 border-b border-slate-200/60 dark:border-slate-800 flex items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-1.5 overflow-x-auto py-0.5 min-w-0 pr-2">
-              <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1 shrink-0">
-                <Tag className="w-3 h-3 text-indigo-500" /> 标签筛选 ({availableTags.length}个):
-              </span>
-              <button
-                onClick={() => setSelectedTag('')}
-                className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 ${
-                  !selectedTag
-                    ? 'bg-blue-600 text-white shadow-sm'
-                    : 'bg-slate-200/60 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-300/60'
-                }`}
-              >
-                全部
-              </button>
-              {availableTags.map((tag) => {
-                const count = tagFrequency[tag] || 0;
-                return (
-                  <div
-                    key={tag}
-                    onClick={() => setSelectedTag(selectedTag === tag ? '' : tag)}
-                    className={`group/topTag px-2 py-0.5 rounded-md text-[11px] font-medium transition shrink-0 flex items-center gap-1 cursor-pointer select-none ${
-                      selectedTag === tag
-                        ? 'bg-indigo-600 text-white shadow-sm'
-                        : 'bg-white dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700 hover:border-indigo-300 hover:text-indigo-600'
-                    }`}
-                  >
-                    <span>#{tag}</span>
-                    <span className="opacity-70 text-[10px]">({count})</span>
-                    <button
-                      onClick={(e) => handleRemoveGlobalTag(tag, e)}
-                      className="opacity-0 group-hover/topTag:opacity-100 hover:text-rose-500 transition ml-0.5"
-                      title="从所有文章中移除此标签"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* 右侧全局标签清理按钮 */}
-            <div className="shrink-0 flex items-center gap-1.5">
-              <button
-                onClick={handleClearAllTags}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg border border-rose-200 dark:border-rose-900/60 bg-rose-50/70 dark:bg-rose-950/40 text-rose-600 dark:text-rose-400 hover:bg-rose-100 transition text-[11px] font-medium"
-                title="清空当前所有文章的历史标签，彻底解决标签膨胀，以便重新规范分类"
-              >
-                <Trash2 className="w-3 h-3" />
-                <span>清空全部旧标签</span>
-              </button>
-            </div>
-          </div>
+        {!isTrashView && (
+          <TagFilterBar
+            availableTags={availableTags}
+            selectedTag={selectedTag}
+            onSelectTag={setSelectedTag}
+            tagFrequency={tagFrequency}
+            onRemoveTag={handleRemoveGlobalTag}
+            onClearAll={handleClearAllTags}
+          />
         )}
 
         {/* 回收站提示横幅 */}
@@ -1507,186 +687,39 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
         )}
-
         {/* 批量操作控制浮条 */}
-        <div className="px-6 py-2.5 bg-slate-100/40 dark:bg-slate-900/40 border-b border-slate-200/50 dark:border-slate-800 flex items-center justify-between text-xs">
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleToggleSelectAll}
-              className="flex items-center gap-1.5 font-medium text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-slate-100"
-            >
-              {selectedIds.size === filteredArticles.length && filteredArticles.length > 0 ? (
-                <CheckSquare className="w-4 h-4 text-blue-600 dark:text-blue-400" />
-              ) : (
-                <Square className="w-4 h-4 text-slate-400 dark:text-slate-600" />
-              )}
-              <span>
-                已选 {selectedIds.size} / {filteredArticles.length} 项
-              </span>
-            </button>
-            {syncProgress && (
-              <span className="text-blue-600 dark:text-blue-400 animate-pulse font-medium">
-                {syncProgress}
-              </span>
-            )}
-          </div>
-
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-2 animate-fade-in">
-              {!isTrashView ? (
-                <>
-                  <button
-                    onClick={() => handleBatchAI('quick')}
-                    disabled={loading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/60 font-medium transition text-xs"
-                    title="【阶段1·初筛】正文限前3000字，评级分拣(留/删/疑)，不打标签"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    1. 批量粗读初筛
-                  </button>
-
-                  <button
-                    onClick={() => handleBatchAI('categorize')}
-                    disabled={loading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 hover:bg-amber-100 dark:hover:bg-amber-900/60 font-medium transition text-xs"
-                    title="【阶段2·分类】归档推荐与规范打标，优先收敛已有标签池，严格限制1~2个标签"
-                  >
-                    <Tag className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400" />
-                    2. 批量词条分类
-                  </button>
-
-                  <button
-                    onClick={() => handleBatchAI('deep')}
-                    disabled={loading}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 font-medium transition text-xs"
-                    title="【阶段3·精读】正文全文不限字数深度解析，抓取知乎高赞热评Top 5深入排坑"
-                  >
-                    <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
-                    3. 批量全文精读
-                  </button>
-
-                  <select
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        handleBatchMove(e.target.value);
-                        e.target.value = '';
-                      }
-                    }}
-                    defaultValue=""
-                    className="px-2.5 py-1.5 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 text-xs font-medium focus:outline-none"
-                  >
-                    <option value="" disabled>
-                      移动到收藏夹...
-                    </option>
-                    {collections.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.title}
-                      </option>
-                    ))}
-                  </select>
-
-                  <button
-                    onClick={handleBatchMoveToTrash}
-                    disabled={loading}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/60 font-medium transition"
-                    title="移出分拣范围放入回收站（不直接删除知乎线上收藏）"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    移出分拣 (入回收站)
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={handleBatchRestore}
-                    disabled={loading}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 font-medium transition"
-                  >
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    批量恢复回分拣台
-                  </button>
-
-                  <button
-                    onClick={handleBatchPermanentDelete}
-                    disabled={loading}
-                    className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-600 text-white hover:bg-red-700 font-medium transition shadow-sm"
-                    title="彻底从知乎线上取消收藏并从本地彻底删除"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    彻底从知乎删除
-                  </button>
-                </>
-              )}
-            </div>
-          )}
-        </div>
+        <BatchActionBar
+          selectedIds={selectedIds}
+          filteredArticles={filteredArticles}
+          syncProgress={syncProgress}
+          isTrashView={isTrashView}
+          loading={loading}
+          collections={collections}
+          onToggleSelectAll={handleToggleSelectAll}
+          onBatchAI={handleBatchAI}
+          onBatchMove={handleBatchMove}
+          onBatchMoveToTrash={handleBatchMoveToTrash}
+          onBatchRestore={handleBatchRestore}
+          onBatchPermanentDelete={handleBatchPermanentDelete}
+        />
 
         {/* 卡片流展示区 */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {filteredArticles.length === 0 ? (
-            <div className="h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-600 space-y-3">
-              <div className="w-16 h-16 rounded-3xl bg-slate-100 dark:bg-slate-900 flex items-center justify-center text-slate-300 dark:text-slate-700">
-                {isTrashView ? <Trash2 className="w-8 h-8" /> : <FolderOpen className="w-8 h-8" />}
-              </div>
-              <p className="text-sm">
-                {isTrashView
-                  ? '回收站为空，移出分拣范围的内容会在此暂存'
-                  : '暂无内容，请在左侧收藏夹点击刷新拉取'}
-              </p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {filteredArticles.map((article) => (
-                <ArticleCard
-                  key={article.id}
-                  article={article}
-                  collections={collections}
-                  isSelected={selectedIds.has(article.id)}
-                  isTrashView={isTrashView}
-                  isQueueProcessing={queueState.currentArticleId === article.id}
-                  onSelect={(sel) => {
-                    const next = new Set(selectedIds);
-                    sel ? next.add(article.id) : next.delete(article.id);
-                    setSelectedIds(next);
-                  }}
-                  onQuickRead={() => handleAnalyzeSingle(article, 'quick')}
-                  onCategorize={() => handleAnalyzeSingle(article, 'categorize')}
-                  onDeepRead={() => handleAnalyzeSingle(article, 'deep')}
-                  onMove={async (targetColId) => {
-                    await moveArticleBetweenCollections(
-                      article.contentId,
-                      article.contentType,
-                      article.collectionId,
-                      targetColId
-                    );
-                    await db.articles.delete(article.id);
-                  }}
-                  onRemove={async () => {
-                    // 移入回收站
-                    await handleMoveToTrashSingle(article);
-                  }}
-                  onRestore={async () => {
-                    // 从回收站恢复
-                    await handleRestoreSingle(article);
-                  }}
-                  onPermanentDelete={async () => {
-                    // 彻底删除
-                    await handlePermanentDeleteSingle(article);
-                  }}
-                  onUpdateRating={async (rating) => {
-                    await db.articles.update(article.id, { aiTriageRating: rating });
-                  }}
-                  onUpdateTags={async (tags) => {
-                    await db.articles.update(article.id, { tags });
-                  }}
-                  onTagClick={(tag) => {
-                    setSelectedTag(selectedTag === tag ? '' : tag);
-                  }}
-                />
-              ))}
-            </div>
-          )}
-        </div>
+        <ArticleList
+          filteredArticles={filteredArticles}
+          collections={collections}
+          selectedIds={selectedIds}
+          isTrashView={isTrashView}
+          currentArticleId={queueState.currentArticleId}
+          selectedTag={selectedTag}
+          onSelectIds={setSelectedIds}
+          onSelectTag={setSelectedTag}
+          onQuickRead={(article) => handleAnalyzeSingle(article, 'quick')}
+          onCategorize={(article) => handleAnalyzeSingle(article, 'categorize')}
+          onDeepRead={(article) => handleAnalyzeSingle(article, 'deep')}
+          onMoveToTrash={handleMoveToTrashSingle}
+          onRestore={handleRestoreSingle}
+          onPermanentDelete={handlePermanentDeleteSingle}
+        />
       </div>
 
       {/* 底部悬浮 Toast 提示 */}

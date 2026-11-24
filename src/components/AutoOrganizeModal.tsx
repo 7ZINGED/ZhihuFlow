@@ -624,7 +624,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                     className="rounded text-blue-600 focus:ring-0"
                   />
                   <span>{c.title}</span>
-                  <span className="text-[10px] opacity-70">({colArticleCounts[c.id] !== undefined && colArticleCounts[c.id] > 0 ? colArticleCounts[c.id] : (c.itemCount || 0)}篇)</span>
+                  <span className="text-[10px] opacity-70">({(colArticleCounts[c.id] ?? 0) > 0 ? colArticleCounts[c.id] : (c.itemCount || 0)}篇)</span>
                 </label>
               );
             })}
