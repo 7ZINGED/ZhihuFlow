@@ -21,7 +21,8 @@
 | **全局聚类** | 分类的第一遍（Pass 1）：把批内文章的主题压成有限标签集，数量可自适应 | `synthesizeBatchTaxonomy` | 聚类分析、主题建模、标签生成 |
 | **整批单次打标** | 分类的第二遍（Pass 2）：**一次请求**为整批文章返回标签与归宿，而不是逐篇调用 | `batchCategorizeArticlesWithAI` | 批量分类（易被误解为多次请求）、逐篇打标 |
 | **收藏夹归宿** | 文章被建议移动到的目标收藏夹 | `aiCategory` | 目标分类、归属、目录 |
-| **失效条目** | 知乎侧已删除或当前账号不可访问的内容，不再进入 AI 流程 | `isDeletedOrInvalid` | 死链、坏数据、404 |
+| **失效条目** | 知乎侧已删除或当前账号不可访问的内容，不再进入 AI 流程。由抓取阶段的"幽灵条目"识别，与成员关系消失无关 | `isDeletedOrInvalid`、`formatRawContent` | 死链、坏数据、404 |
+| **成员关系消失** | 内容仍在知乎上，但已从某收藏夹移除；差集只在抓取完整时计算，命中行移入回收站（可恢复、AI 产物保留） | `findVanishedMemberIds`、`fetchCollectionContentsDetailed`、ADR-0006 | 内容失效、删除文章 |
 | **收藏夹成员** | 一条「某内容属于某收藏夹」的关系，对应一行文章记录，主键为 `${collectionId}_${contentId}`。同一内容可有多条成员关系，因此**文章行数不等于内容数** | `safeUpsertArticles`、`pickInheritanceSource` | 重复行、重复文章（作为缺陷描述时） |
 | **产物归属** | AI 产物（摘要、评级、分类、标签、时间戳）属于**内容**，不属于某条成员关系。批次按内容折叠只付一次费用，写回时向同内容其他成员补空、不覆盖 | `applyAIResult`、`collapseByContentId`（ADR-0005） | 每行独立分析、按行缓存结果 |
 | **增量安全合并** | 刷新收藏夹时按 `id` 与 `contentId` 合并远端数据，绝不覆盖本地 AI 产物与用户标记 | `safeUpsertArticles` | 覆盖更新、全量替换、同步（作为写入方式时） |

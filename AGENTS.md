@@ -25,7 +25,8 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 - `src/services/queueEngine.ts` — 队列推进深模块：分片、暂停、熔断、重试（端口注入，不依赖 React / Dexie）
 - `src/services/queueReconcile.ts` — 按文章字段对账队列状态（ADR-0004）
 - `src/services/queueLock.ts` — 队列单写者锁
-- `src/services/zhihuApi.ts` — 知乎登录态、收藏夹抓取、移动 / 删除 / 评论接口
+- `src/services/zhihuApi.ts` — 知乎登录态、收藏夹抓取（含完整性标志）、移动 / 删除 / 评论接口
+- `src/services/membershipCleanup.ts` — 成员关系消失的差集纯函数（ADR-0006）
 - `src/services/exporter.ts`、`backup.ts` — Markdown / Obsidian 导出与本地备份
 - `src/db/index.ts` — Dexie 数据库、`safeUpsertArticles` 增量合并
 - `GLOSSARY.md` — 领域词汇表，写票 / 测试名 / UI 文案前先查
@@ -62,6 +63,8 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 | `src/db/mergeArticle.ts` | 远端覆盖与本地 AI 产物保留（含 false 值） |
 | `src/db/aiPropagation.ts` | 按 contentId 折叠（偏好待处理行）、补空不覆盖、false/0 视为有效值 |
 | `src/services/aiQueue.ts` | 持久化与刷新恢复 |
+| `src/services/membershipCleanup.ts` | 成员关系差集：同收藏夹隔离、跳过已在回收站的行 |
+| `src/services/zhihuApi.fetch.test.ts` | 抓取完整性：分页走完 / 备用接口 / 异常响应 / 缺分页信息 |
 | `src/services/aiPrompts.ts` | 截断 3000 字、标签上限钳制、标签池 / 备选收藏夹注入、描述开关、精读全文与热评 |
 | `src/services/ai.prompts.snapshot.test.ts` | 9 组请求体逐字快照：证明提示词搬移「只搬不改」 |
 

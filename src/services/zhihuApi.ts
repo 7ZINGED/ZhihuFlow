@@ -155,14 +155,24 @@ export async function fetchUserCollectionsList(): Promise<ZhihuCollection[]> {
   return [];
 }
 
+export interface CollectionFetchResult {
+  items: ZhihuArticleItem[];
+  /**
+   * 是否完整走完主接口分页（最后一页 is_end=true）。
+   * 备用接口只取第一页、响应结构异常或缺分页信息时为 false。
+   * 只有 complete=true 才能用它做成员关系差集，否则会把未抓到的正常成员误判为已取消收藏。
+   */
+  complete: boolean;
+}
+
 /**
- * 分页拉取单个收藏夹下的所有收藏内容条目
+ * 分页拉取单个收藏夹下的所有收藏内容条目，并附带抓取完整性标志。
  */
-export async function fetchCollectionContents(
+export async function fetchCollectionContentsDetailed(
   collectionId: string,
   collectionTitle: string,
   onProgress?: (loaded: number) => void
-): Promise<ZhihuArticleItem[]> {
+): Promise<CollectionFetchResult> {
   const headers = await getZhihuHeaders();
   const articles: ZhihuArticleItem[] = [];
   let nextUrl: string | null = `https://www.zhihu.com/api/v4/collections/${collectionId}/items?offset=0&limit=20`;
@@ -170,7 +180,7 @@ export async function fetchCollectionContents(
   while (nextUrl) {
     const res: Response = await fetch(nextUrl, { headers });
     if (!res.ok) {
-      // 备用接口 /contents
+      // 备用接口 /contents：只取第一页，无法保证完整，禁止用于差集
       const backupRes = await fetch(`https://www.zhihu.com/api/v4/collections/${collectionId}/contents?offset=0&limit=20`, { headers });
       if (!backupRes.ok) {
         throw new Error(`获取收藏夹内容失败 [HTTP ${res.status}]，可能触发知乎风控，请刷新知乎网页后重试。`);
@@ -181,24 +191,45 @@ export async function fetchCollectionContents(
           articles.push(formatRawContent(raw, collectionId, collectionTitle));
         }
       }
-      break;
+      if (onProgress) onProgress(articles.length);
+      return { items: articles, complete: false };
     }
 
     const data: any = await res.json();
-    if (Array.isArray(data.data)) {
-      for (const raw of data.data) {
-        articles.push(formatRawContent(raw, collectionId, collectionTitle));
-      }
+    if (!Array.isArray(data.data)) {
+      // 响应结构异常，已抓到的部分不足以判定差集
+      return { items: articles, complete: false };
+    }
+    for (const raw of data.data) {
+      articles.push(formatRawContent(raw, collectionId, collectionTitle));
     }
 
-    if (onProgress) {
-      onProgress(articles.length);
-    }
+    if (onProgress) onProgress(articles.length);
 
-    nextUrl = data.paging?.is_end ? null : data.paging?.next;
+    if (data.paging?.is_end) {
+      return { items: articles, complete: true };
+    }
+    nextUrl = data.paging?.next || null;
+    if (!nextUrl) {
+      // 既无 is_end 也无 next：分页信息缺失，保守认定不完整
+      return { items: articles, complete: false };
+    }
   }
 
-  return articles;
+  return { items: articles, complete: false };
+}
+
+/**
+ * 分页拉取单个收藏夹下的所有收藏内容条目。
+ * 保留原签名供简介生成 / 自动整理等只读场景使用；差集场景请用 Detailed 版本。
+ */
+export async function fetchCollectionContents(
+  collectionId: string,
+  collectionTitle: string,
+  onProgress?: (loaded: number) => void
+): Promise<ZhihuArticleItem[]> {
+  const { items } = await fetchCollectionContentsDetailed(collectionId, collectionTitle, onProgress);
+  return items;
 }
 
 function formatRawContent(raw: any, collectionId: string, collectionTitle: string): ZhihuArticleItem {

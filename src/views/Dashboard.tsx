@@ -49,9 +49,11 @@ import {
 import { isModeCompleted, reconcileQueueWithProgress } from '../services/queueReconcile';
 import { acquireQueueLock, releaseQueueLock } from '../services/queueLock';
 import { createQueueEngine, type QueueEngine } from '../services/queueEngine';
+import { findVanishedMemberIds } from '../services/membershipCleanup';
 import { 
-  fetchUserCollectionsList, 
-  fetchCollectionContents, 
+  fetchUserCollectionsList,
+  fetchCollectionContents,
+  fetchCollectionContentsDetailed,
   fetchHotComments,
   moveArticleBetweenCollections, 
   removeArticleFromCollection
@@ -282,14 +284,33 @@ export const Dashboard: React.FC = () => {
     setLoading(true);
     setSyncProgress(`正在读取「${col.title}」内容...`);
     try {
-      const items = await fetchCollectionContents(collectionId, col.title, (count) => {
+      const { items, complete } = await fetchCollectionContentsDetailed(collectionId, col.title, (count) => {
         setSyncProgress(`已抓取 ${count} 条内容...`);
       });
       await safeUpsertArticles(items);
-      
+
+      // ticket 14：成员关系消失的行移入回收站（可恢复、不删 AI 产物）。
+      // 只有抓取完整才敢做差集——备用接口 / 分页中断时不处理，避免误伤未抓到的正常成员。
+      let trashed = 0;
+      if (complete) {
+        const localRows = await db.articles.where('collectionId').equals(collectionId).toArray();
+        const remoteIds = new Set(items.map((a) => a.id));
+        const vanishedIds = findVanishedMemberIds(localRows, remoteIds, collectionId);
+        if (vanishedIds.length > 0) {
+          const trashedAt = Date.now();
+          await db.articles.bulkUpdate(
+            vanishedIds.map((key) => ({ key, changes: { inTrash: true, trashedAt } }))
+          );
+          trashed = vanishedIds.length;
+        }
+      }
+
       const actualCount = await db.articles.where('collectionId').equals(collectionId).count();
       await db.collections.update(collectionId, { itemCount: actualCount });
-      showToast(`✅ 成功同步「${col.title}」最新内容，已完整保留已有粗读与标签数据！`);
+      const tail = trashed > 0
+        ? `，${trashed} 篇已不在知乎端，已移入回收站（可恢复）`
+        : complete ? '' : '（抓取未完整，本次跳过成员失效检查）';
+      showToast(`✅ 成功同步「${col.title}」最新内容，已完整保留已有粗读与标签数据${tail}！`);
     } catch (err: any) {
       alert(`读取收藏夹失败: ${err.message}`);
     } finally {
