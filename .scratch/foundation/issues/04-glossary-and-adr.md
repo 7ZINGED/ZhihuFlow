@@ -4,15 +4,17 @@
 
 **Blocked by:** None (can start immediately)
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `GLOSSARY.md` 至少收录：分拣台、粗读、词条分类、精读、标签池、全局聚类、整批单次打标、收藏夹归宿、失效条目、增量安全合并、预演、熔断、批次
-- [ ] 每个词条有一句定义，并标注要避免的同义词
-- [ ] ADR-0001：文章数据的唯一真相源是 IndexedDB（local-first，无自建后端）
-- [ ] ADR-0002：AI 调用走 OpenAI 兼容协议，由扩展直连，API Key 只存本地
-- [ ] ADR-0003：三阶段渐进式流水线 + 两遍标签聚类 + 整批单次打标，以及各自的取舍
-- [ ] `AGENTS.md` 与 `docs/agents/domain.md` 中的链接可解析
+- [x] `GLOSSARY.md` 至少收录：分拣台、粗读、词条分类、精读、标签池、全局聚类、整批单次打标、收藏夹归宿、失效条目、增量安全合并、预演、熔断、批次
+- [x] 每个词条有一句定义，并标注要避免的同义词
+- [x] ADR-0001：文章数据的唯一真相源是 IndexedDB（local-first，无自建后端）
+- [x] ADR-0002：AI 调用走 OpenAI 兼容协议，由扩展直连，API Key 只存本地
+- [x] ADR-0003：三阶段渐进式流水线 + 两遍标签聚类 + 整批单次打标，以及各自的取舍
+- [x] `AGENTS.md` 与 `docs/agents/domain.md` 中的链接可解析
 
 ## Comments
 
 - 2026-11-24: 队列状态的真相源单独由 ticket 09 决定，不塞进这批 ADR。
+- 2026-11-24: 除要求的 13 个词外，补了「分拣评级」「队列检查点」「运行态元数据」三个词——前两个是 ADR-0004 的直接后果，不写下来会在后续票里重新混用。
+- 2026-11-24: 新增 `docs/adr/README.md` 作为索引，避免 ticket 与代码里的 `ADR-000x` 引用无处可查。

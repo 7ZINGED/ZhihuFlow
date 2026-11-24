@@ -23,9 +23,10 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 - `src/services/zhihuApi.ts` — 知乎登录态、收藏夹抓取、移动 / 删除 / 评论接口
 - `src/services/exporter.ts`、`backup.ts` — Markdown / Obsidian 导出与本地备份
 - `src/db/index.ts` — Dexie 数据库、`safeUpsertArticles` 增量合并
+- `GLOSSARY.md` — 领域词汇表，写票 / 测试名 / UI 文案前先查
 - `docs/agents/` — 工程技能使用的仓库约定
 - `.scratch/` — 本地 issue tracker（spec 与 tickets）
-- `docs/adr/` — 架构决策记录（随领域建模逐步建立）
+- `docs/adr/` — 架构决策记录，索引见 `docs/adr/README.md`
 
 ## Architecture rules
 
