@@ -59,6 +59,7 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 | `src/services/queueReconcile.ts` | 按文章字段补标 done、processing 回退、不回退已 done |
 | `src/services/queueLock.ts` | 单写者获取 / 冲突 / 释放 / 不支持时降级 |
 | `src/db/mergeArticle.ts` | 远端覆盖与本地 AI 产物保留（含 false 值） |
+| `src/db/aiPropagation.ts` | 按 contentId 折叠（偏好待处理行）、补空不覆盖、false/0 视为有效值 |
 | `src/services/aiQueue.ts` | 持久化与刷新恢复 |
 
 待补（见 `.scratch/foundation/`）：提示词构造（ticket 11）、`formatRawContent`。

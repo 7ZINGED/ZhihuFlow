@@ -1,4 +1,5 @@
 import Dexie, { type Table } from 'dexie';
+import { buildFillPatch } from './aiPropagation';
 import { mergeArticle, pickInheritanceSource } from './mergeArticle';
 
 export interface ZhihuCollection {
@@ -137,5 +138,58 @@ export async function safeUpsertArticles(newItems: ZhihuArticleItem[]): Promise<
   });
 
   await db.articles.bulkPut(mergedItems);
+}
+
+export interface ApplyAIResultOptions {
+  /** 是否把结果补到同 contentId 的其他成员行，默认 true（见 ADR-0005） */
+  propagate?: boolean;
+}
+
+export interface ApplyAIResultOutcome {
+  /** 直接写入的目标行数：0 表示文章已不存在，1 表示成功 */
+  updated: number;
+  /** 收到了空缺补全的同内容成员行数 */
+  filled: number;
+}
+
+/**
+ * 写入 AI 产物（ADR-0005）。
+ *
+ * - 目标行整体写入；
+ * - 同 `contentId` 的其他成员行只补自己仍然为空的字段，绝不覆盖已有产物或用户手工结果；
+ * - 成员特有的字段（collectionId / inTrash / selected / markedForDelete）不参与传播。
+ *
+ * 三个单篇 AI 分支（粗读 / 分类 / 精读）与队列的分类批处理都应当走这里，
+ * 否则同一内容的其他成员会停留在「未处理」，下次再被选中时重复付费。
+ */
+export async function applyAIResult(
+  articleId: string,
+  patch: Partial<ZhihuArticleItem>,
+  options: ApplyAIResultOptions = {}
+): Promise<ApplyAIResultOutcome> {
+  const source = await db.articles.get(articleId);
+  if (!source) return { updated: 0, filled: 0 };
+
+  await db.articles.update(articleId, patch);
+
+  const contentId = source.contentId?.trim();
+  if (options.propagate === false || !contentId) {
+    return { updated: 1, filled: 0 };
+  }
+
+  const siblings = await db.articles.where('contentId').equals(contentId).toArray();
+  let filled = 0;
+
+  for (const sibling of siblings) {
+    if (sibling.id === articleId) continue;
+
+    const fill = buildFillPatch(sibling, patch);
+    if (Object.keys(fill).length === 0) continue;
+
+    await db.articles.update(sibling.id, fill);
+    filled += 1;
+  }
+
+  return { updated: 1, filled };
 }
 

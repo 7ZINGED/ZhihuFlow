@@ -32,7 +32,8 @@ import {
   BookOpen,
   Clock
 } from 'lucide-react';
-import { db, safeUpsertArticles, type ZhihuArticleItem, type ZhihuCollection } from '../db';
+import { db, applyAIResult, safeUpsertArticles, type ZhihuArticleItem, type ZhihuCollection } from '../db';
+import { collapseByContentId } from '../db/aiPropagation';
 import { ArticleCard } from '../components/ArticleCard';
 import { SettingsModal } from '../components/SettingsModal';
 import { DescriptionModal } from '../components/DescriptionModal';
@@ -45,7 +46,7 @@ import {
   saveQueueToStorage, 
   clearQueueStorage 
 } from '../services/aiQueue';
-import { reconcileQueueWithProgress } from '../services/queueReconcile';
+import { isModeCompleted, reconcileQueueWithProgress } from '../services/queueReconcile';
 import { acquireQueueLock, releaseQueueLock } from '../services/queueLock';
 import { createQueueEngine, type QueueEngine } from '../services/queueEngine';
 import { 
@@ -420,7 +421,8 @@ export const Dashboard: React.FC = () => {
   ) => {
     if (mode === 'quick') {
       const res = await quickTriageArticleWithAI(article);
-      await db.articles.update(article.id, {
+      // ADR-0005：AI 产物属于内容，同 contentId 的其他成员只补空、不覆盖
+      await applyAIResult(article.id, {
         aiSummary: res.summary,
         aiKeyTakeaways: res.keyTakeaways,
         aiTriageRating: res.triageRating,
@@ -473,7 +475,7 @@ export const Dashboard: React.FC = () => {
         updateData.aiSummary = res.summary;
       }
 
-      await db.articles.update(article.id, updateData);
+      await applyAIResult(article.id, updateData);
     } else if (mode === 'deep') {
       let hotComments = article.hotComments || [];
       if (!hotComments || hotComments.length === 0) {
@@ -485,7 +487,7 @@ export const Dashboard: React.FC = () => {
       }
 
       const res = await deepReadArticleWithAI(article, hotComments);
-      await db.articles.update(article.id, {
+      await applyAIResult(article.id, {
         aiSummary: res.summary,
         aiKeyTakeaways: res.keyTakeaways,
         aiCommentsInsight: res.commentsInsight,
@@ -513,7 +515,7 @@ export const Dashboard: React.FC = () => {
         loadArticle: (id) => db.articles.get(id),
         loadArticles: (ids) => db.articles.where('id').anyOf(ids).toArray(),
         updateArticle: async (id, patch) => {
-          await db.articles.update(id, patch);
+          await applyAIResult(id, patch);
         },
         synthesizeTaxonomy: (arts, opts) => synthesizeBatchTaxonomy(arts, opts),
         batchCategorize: async (arts, cols, opts) => {
@@ -629,6 +631,24 @@ export const Dashboard: React.FC = () => {
 
     if (targetsToProcess.length === 0) {
       return;
+    }
+
+    // ADR-0005：同一内容被收进多个收藏夹时本地会有多行，但它们的内容完全相同。
+    // 只要用户没有显式要求「全部重跑」，一次批次就只为这篇内容付一次 AI 费用。
+    const anyAlreadyDone = targets.some((a) => isModeCompleted(a, mode));
+    const forceRerun = anyAlreadyDone && targetsToProcess.length === targets.length;
+    if (!forceRerun) {
+      const beforeCollapse = targetsToProcess.length;
+      const { kept, collapsed } = collapseByContentId(
+        targetsToProcess,
+        (a) => !isModeCompleted(a, mode)
+      );
+      if (collapsed.length > 0) {
+        targetsToProcess = kept;
+        showToast(
+          `🔗 已按内容去重：${beforeCollapse} 篇中 ${collapsed.length} 篇是同一内容的其他收藏夹成员，同内容只分析一次，结果会同步过去`
+        );
+      }
     }
 
     // 构建新任务列表

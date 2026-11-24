@@ -8,6 +8,7 @@
 | [0002](./0002-openai-compatible-direct.md) | AI 调用走 OpenAI 兼容协议，扩展直连，Key 只存本地 | 已接受 |
 | [0003](./0003-three-stage-pipeline.md) | 三阶段渐进式流水线 + 两遍标签聚类 + 整批单次打标 | 已接受 |
 | [0004](./0004-queue-state-source-of-truth.md) | 队列状态降权为运行检查点，进度只认文章字段 | 已接受 |
+| [0005](./0005-ai-output-belongs-to-content.md) | AI 产物属于内容：批次按 contentId 折叠，写回只补空不覆盖 | 已接受 |
 
 ## 写新 ADR 的时机
 
