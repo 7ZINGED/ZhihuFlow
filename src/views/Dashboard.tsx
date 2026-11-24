@@ -45,6 +45,8 @@ import {
   saveQueueToStorage, 
   clearQueueStorage 
 } from '../services/aiQueue';
+import { reconcileQueueWithProgress } from '../services/queueReconcile';
+import { acquireQueueLock, releaseQueueLock } from '../services/queueLock';
 import { 
   fetchUserCollectionsList, 
   fetchCollectionContents, 
@@ -117,6 +119,38 @@ export const Dashboard: React.FC = () => {
     if (pendingCount > 0 && queueState.status === 'paused') {
       setToastMsg({ text: `已从本地安全恢复 AI 分拣队列（剩余 ${pendingCount} 篇待处理，可随时点击继续）` });
     }
+  }, []);
+
+  // ADR-0004：载入后按文章字段对账，让「文章已写、队列仍 pending」的崩溃窗口自愈，避免重复消耗额度
+  useEffect(() => {
+    const ids = queueState.tasks.map((t) => t.articleId);
+    if (ids.length === 0) return;
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const rows = await db.articles.where('id').anyOf(ids).toArray();
+        if (cancelled) return;
+        const { state, recovered, unverified } = reconcileQueueWithProgress(queueState, rows);
+        if (recovered > 0) {
+          console.info(`[queue] 依据文章字段补标 ${recovered} 条已完成任务`);
+        }
+        if (unverified > 0) {
+          console.warn(`[queue] ${unverified} 条任务标记完成但文章缺少对应产物，按 ADR-0004 保持原状`);
+        }
+        if (state !== queueState) {
+          setQueueState(state);
+          saveQueueToStorage(state);
+        }
+      } catch (e) {
+        console.warn('[queue] 队列对账失败，沿用本地快照:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // 只在挂载时对账一次；之后以循环内的实时写入为准
   }, []);
 
   const sidebarFileInputRef = useRef<HTMLInputElement>(null);
@@ -707,6 +741,8 @@ export const Dashboard: React.FC = () => {
     }
 
     isProcessingRef.current = false;
+    // 循环因暂停 / 完成而退出：释放所有权，允许用户在本页或其他页重新接管
+    releaseQueueLock();
   };
 
   // 批量 AI 分拣：加入持久化任务队列并启动 (支持随时暂停与刷新断点恢复)
@@ -823,6 +859,12 @@ export const Dashboard: React.FC = () => {
       chunkInfo,
     };
 
+    // ADR-0004：单写者约束，避免两个标签页同时推进同一队列，重复消耗 API 额度
+    if (!(await acquireQueueLock())) {
+      showToast('⚠️ 另一个标签页正在运行 AI 队列，请先回到该页面暂停或关闭后再试');
+      return;
+    }
+
     setQueueState(nextState);
     saveQueueToStorage(nextState);
     setSelectedIds(new Set()); // 清空勾选以便用户继续操作其他内容
@@ -854,7 +896,11 @@ export const Dashboard: React.FC = () => {
   };
 
   // 恢复继续队列处理
-  const handleResumeQueue = () => {
+  const handleResumeQueue = async () => {
+    if (!(await acquireQueueLock())) {
+      showToast('⚠️ 另一个标签页正在运行 AI 队列，请先回到该页面暂停或关闭后再试');
+      return;
+    }
     queueStatusRef.current = 'running';
     const nextState: AIQueueState = {
       ...queueState,
@@ -870,15 +916,21 @@ export const Dashboard: React.FC = () => {
   const handleClearQueue = () => {
     queueStatusRef.current = 'idle';
     isProcessingRef.current = false;
+    releaseQueueLock();
     clearQueueStorage();
     setQueueState({ status: 'idle', mode: 'quick', tasks: [] });
     showToast('已清空 AI 分拣队列');
   };
 
   // 一键重试当前队列中所有失败项
-  const handleRetryFailed = () => {
+  const handleRetryFailed = async () => {
     const failedTasks = queueState.tasks.filter((t) => t.status === 'failed');
     if (failedTasks.length === 0) return;
+
+    if (!(await acquireQueueLock())) {
+      showToast('⚠️ 另一个标签页正在运行 AI 队列，请先回到该页面暂停或关闭后再试');
+      return;
+    }
 
     const updatedTasks = queueState.tasks.map((t) =>
       t.status === 'failed' ? { ...t, status: 'pending' as const, error: undefined } : t

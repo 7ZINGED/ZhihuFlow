@@ -31,7 +31,7 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 
 1. **远端刷新只走 `safeUpsertArticles`。** 任何从知乎拉取的数据都必须经过它合并，禁止用远端数据整表覆盖本地文章；本地 AI 产物（tags、评级、摘要、金句、评论洞察、时间戳、回收站状态）不得丢失。
 2. **AI 调用只从 `src/services/ai.ts` 发出。** 组件不得直接 `fetch` 大模型端点；提示词必须来自用户可覆盖的设置，不要在调用点硬编码。
-3. **队列只有一个写入者。** 队列状态统一由 `aiQueue.ts` 的存储键管理；UI 不另写 storage key，同一时间只允许一个运行中的队列。队列与文章两个数据源的一致性以 ADR 为准。
+3. **队列只有一个写入者。** 队列状态统一由 `aiQueue.ts` 的存储键管理；UI 不另写 storage key。队列是**运行检查点**而非进度真相——每篇是否处理完只看文章字段（`aiTriageRating` / `aiClassifiedAt` / `aiDeepReadAt`），载入时由 `queueReconcile.ts` 对账，运行中用 `queueLock.ts` 保证单写者。详见 ADR-0004。
 4. **行为改动必须落在公共缝上。** 测试只测公共接口，不测私有函数、不绕过接口查数据库。没有合适的缝时，先做 prefactor 票，再写行为。
 5. **本地优先、无后端。** 不引入自建服务器、遥测或第三方中转；API Key 只存 `chrome.storage.local`，不得写入源码、日志或提交历史。
 6. **语言约定。** UI 文案与注释用中文；标识符、类型名、测试名用英文。领域术语以 `GLOSSARY.md` 为准，不造同义词。
