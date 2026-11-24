@@ -673,6 +673,7 @@ export interface AIAnalysisResult {
   summary: string;
   keyTakeaways: string[];
   recommendedCategory: string;
+  categorizeReason?: string;
   triageRating: 'keep' | 'discard' | 'review';
   triageReason: string;
   tags?: string[];
@@ -707,6 +708,7 @@ export async function analyzeArticleWithAI(
       summary: article.aiSummary || '',
       keyTakeaways: [],
       recommendedCategory: catRes.recommendedCategory,
+      categorizeReason: catRes.categorizeReason,
       triageRating: 'review',
       triageReason: catRes.categorizeReason || '',
       tags: catRes.tags,

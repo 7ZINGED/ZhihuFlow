@@ -103,6 +103,10 @@ export const Dashboard: React.FC = () => {
   const queueStatusRef = useRef<AIQueueState['status']>(queueState.status);
   const isProcessingRef = useRef<boolean>(false);
 
+  // 通过函数读取 ref，避免 TypeScript 把异步流程中的状态过度收窄为 'running'
+  const isQueueStopped = () =>
+    queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle';
+
   useEffect(() => {
     queueStatusRef.current = queueState.status;
   }, [queueState.status]);
@@ -383,7 +387,7 @@ export const Dashboard: React.FC = () => {
     batchTaxonomy?: string[]
   ) => {
     if (mode === 'quick') {
-      const res = await quickTriageArticleWithAI(article, { maxChars: 3000 });
+      const res = await quickTriageArticleWithAI(article);
       await db.articles.update(article.id, {
         aiSummary: res.summary,
         aiKeyTakeaways: res.keyTakeaways,
@@ -485,7 +489,7 @@ export const Dashboard: React.FC = () => {
       // 词条分类模式：采用【整批打包单次请求 (Batch One-Shot)】极速映射！
       // 每次将一整批（例如 20 篇）在 1 个请求中交给大模型，在全局标签池下一次性返回整批标签与归属
       for (let c = 0; c < tasks.length; c += chunkSize) {
-        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        if (isQueueStopped()) {
           break;
         }
 
@@ -610,7 +614,7 @@ export const Dashboard: React.FC = () => {
         setQueueState(stepState);
         saveQueueToStorage(stepState);
 
-        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        if (isQueueStopped()) {
           break;
         }
 
@@ -622,7 +626,7 @@ export const Dashboard: React.FC = () => {
       // 快速粗读 与 全文精读 模式：单篇深入流式推进
       for (let i = 0; i < tasks.length; i++) {
         // 循环开始前检查是否已暂停或清空
-        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        if (isQueueStopped()) {
           break;
         }
 
@@ -692,7 +696,7 @@ export const Dashboard: React.FC = () => {
         setQueueState(stepState);
         saveQueueToStorage(stepState);
 
-        if (queueStatusRef.current === 'paused' || queueStatusRef.current === 'idle') {
+        if (isQueueStopped()) {
           break;
         }
 

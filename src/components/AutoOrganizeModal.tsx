@@ -147,7 +147,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
           import('../db').then(({ db }) => {
             db.articles.where('collectionId').anyOf(sourceIds).toArray().then((dbArticles) => {
               const articleMap = new Map(dbArticles.map((a) => [a.id, a]));
-              const calibratedPlans = updatedDraft.plans.map((p) => {
+              const calibratedPlans = updatedDraft.plans.map((p): PlanItem => {
                 const liveArt = articleMap.get(p.article.id) || p.article;
                 if (liveArt.aiCategory && liveArt.aiCategory !== '其他') {
                   const target = collections.find(
@@ -158,7 +158,7 @@ export const AutoOrganizeModal: React.FC<AutoOrganizeModalProps> = ({
                       ...p,
                       article: liveArt,
                       toCollection: target,
-                      status: (target.id !== liveArt.collectionId ? 'pending' : 'skipped') as const,
+                      status: target.id !== liveArt.collectionId ? 'pending' : 'skipped',
                       reason: liveArt.aiCategoryReason || '继承自分拣台AI推荐',
                     };
                   }

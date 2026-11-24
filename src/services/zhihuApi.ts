@@ -115,9 +115,9 @@ export async function fetchUserCollectionsList(): Promise<ZhihuCollection[]> {
       let nextUrl: string | null = `https://www.zhihu.com/api/v4/members/${urlToken}/collections?offset=0&limit=20`;
 
       while (nextUrl) {
-        const res = await fetch(nextUrl, { headers });
+        const res: Response = await fetch(nextUrl, { headers });
         if (!res.ok) break;
-        const data = await res.json();
+        const data: any = await res.json();
         if (Array.isArray(data.data)) {
           for (const item of data.data) {
             const count = item.item_count ?? item.items_count ?? item.itemCount ?? item.total_count ?? 0;
@@ -168,7 +168,7 @@ export async function fetchCollectionContents(
   let nextUrl: string | null = `https://www.zhihu.com/api/v4/collections/${collectionId}/items?offset=0&limit=20`;
 
   while (nextUrl) {
-    const res = await fetch(nextUrl, { headers });
+    const res: Response = await fetch(nextUrl, { headers });
     if (!res.ok) {
       // 备用接口 /contents
       const backupRes = await fetch(`https://www.zhihu.com/api/v4/collections/${collectionId}/contents?offset=0&limit=20`, { headers });
@@ -184,7 +184,7 @@ export async function fetchCollectionContents(
       break;
     }
 
-    const data = await res.json();
+    const data: any = await res.json();
     if (Array.isArray(data.data)) {
       for (const raw of data.data) {
         articles.push(formatRawContent(raw, collectionId, collectionTitle));
