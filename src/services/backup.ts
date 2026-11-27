@@ -1,5 +1,11 @@
 import { db, type ZhihuCollection, type ZhihuArticleItem } from '../db';
-import { getAISettings, saveAISettings } from './ai';
+import {
+  getActiveSettings,
+  loadProfileStore,
+  redactProfilesForBackup,
+  restoreProfilesFromBackup,
+  type ApiProfile,
+} from './apiProfiles';
 
 export interface ZhihuFlowBackupData {
   version: number;
@@ -7,7 +13,18 @@ export interface ZhihuFlowBackupData {
   exportedAt: string;
   collections: ZhihuCollection[];
   articles: ZhihuArticleItem[];
+  /** 新格式：完整档案，但 Key 已置空。 */
+  profiles?: ApiProfile[];
+  activeProfileId?: string;
+  /** 旧格式兼容字段；导出时 Key 同样置空。 */
   settings?: any;
+}
+
+export interface BackupImportResult {
+  collectionsCount: number;
+  articlesCount: number;
+  /** 备份中的 Key 已按 ADR-0007 置空，用户需要重新填写。 */
+  keyRequiresRefill: boolean;
 }
 
 /**
@@ -16,7 +33,8 @@ export interface ZhihuFlowBackupData {
 export async function exportAllDataToJson(): Promise<{ collectionsCount: number; articlesCount: number }> {
   const collections = await db.collections.toArray();
   const articles = await db.articles.toArray();
-  const settings = await getAISettings();
+  const store = await loadProfileStore();
+  const settings = getActiveSettings(store);
 
   const backupData: ZhihuFlowBackupData = {
     version: 1,
@@ -24,7 +42,10 @@ export async function exportAllDataToJson(): Promise<{ collectionsCount: number;
     exportedAt: new Date().toISOString(),
     collections,
     articles,
-    settings,
+    profiles: redactProfilesForBackup(store),
+    activeProfileId: store.activeProfileId,
+    // 兼容旧版备份读取方；Key 一律置空（ADR-0007）
+    settings: settings ? { ...settings, apiKey: '' } : undefined,
   };
 
   const jsonString = JSON.stringify(backupData, null, 2);
@@ -43,7 +64,7 @@ export async function exportAllDataToJson(): Promise<{ collectionsCount: number;
 /**
  * 从 JSON 文件解析并导入数据到本地 IndexedDB
  */
-export async function importDataFromJsonFile(file: File): Promise<{ collectionsCount: number; articlesCount: number }> {
+export async function importDataFromJsonFile(file: File): Promise<BackupImportResult> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = async (e) => {
@@ -62,13 +83,20 @@ export async function importDataFromJsonFile(file: File): Promise<{ collectionsC
         if (data.articles.length > 0) {
           await db.articles.bulkPut(data.articles);
         }
-        if (data.settings && data.settings.endpoint) {
-          await saveAISettings(data.settings);
+        const hasApiBackup = Array.isArray(data.profiles) || Boolean(data.settings?.endpoint);
+        if (hasApiBackup) {
+          // 无论新档案还是旧扁平设置，导入的 Key 都会被置空（ADR-0007）
+          await restoreProfilesFromBackup({
+            profiles: data.profiles,
+            activeProfileId: data.activeProfileId,
+            settings: data.settings,
+          });
         }
 
         resolve({
           collectionsCount: data.collections.length,
           articlesCount: data.articles.length,
+          keyRequiresRefill: hasApiBackup,
         });
       } catch (err) {
         reject(err);

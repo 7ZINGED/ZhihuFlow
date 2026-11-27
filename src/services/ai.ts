@@ -1,4 +1,5 @@
 import { type AISettings } from '../db';
+import { DEFAULT_AI_SETTINGS, getActiveSettings, getPinnedSettings, loadProfileStore, saveProfileStore } from './apiProfiles';
 import { mapHttpError, normalizeTags, parseAiJson, stripCodeFence } from './aiParse';
 import {
   DEFAULT_CATEGORIZE_PROMPT,
@@ -22,32 +23,23 @@ import {
 export { DEFAULT_TRIAGE_PROMPT, DEFAULT_CATEGORIZE_PROMPT } from './aiPrompts';
 export type { CategorizeOptions } from './aiPrompts';
 
-export const DEFAULT_AI_SETTINGS: AISettings = {
-  endpoint: 'https://api.deepseek.com/v1',
-  model: 'deepseek-chat',
-  apiKey: '',
-  customTriagePrompt: DEFAULT_TRIAGE_PROMPT,
-  customCategorizePrompt: DEFAULT_CATEGORIZE_PROMPT,
-  maxTagCount: 2,
-  allowModifyTags: true,
-  allowModifyDescription: true,
-  batchLimitQuick: 30,
-  batchLimitCategorize: 20,
-  batchLimitDeep: 10,
-  maxGlobalTags: 8,
-  adaptiveGlobalTags: true,
-};
+// 配置档案是 AI 设置的唯一来源；保留同名导出供既有调用点使用
+export { DEFAULT_AI_SETTINGS } from './apiProfiles';
 
 export async function getAISettings(): Promise<AISettings> {
-  const result = await chrome.storage.local.get(['ai_settings']);
-  return {
-    ...DEFAULT_AI_SETTINGS,
-    ...(result.ai_settings || {}),
-  };
+  // 队列运行期间由 pinSettings 钉住入队快照；此时忽略档案切换（ADR-0007）
+  const pinned = getPinnedSettings();
+  if (pinned) return pinned;
+  const store = await loadProfileStore();
+  return getActiveSettings(store) ?? DEFAULT_AI_SETTINGS;
 }
 
 export async function saveAISettings(settings: AISettings): Promise<void> {
-  await chrome.storage.local.set({ ai_settings: settings });
+  const store = await loadProfileStore();
+  const active = store.profiles.find((p) => p.id === store.activeProfileId);
+  if (!active) return;
+  active.settings = { ...settings };
+  await saveProfileStore(store);
 }
 
 export function normalizeEndpoint(url: string): string {
@@ -56,6 +48,105 @@ export function normalizeEndpoint(url: string): string {
     return clean;
   }
   return `${clean}/chat/completions`;
+}
+
+export type ConnectionTestCategory = 'config' | 'auth' | 'network' | 'response';
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  latencyMs: number;
+  model?: string;
+  category?: ConnectionTestCategory;
+  message: string;
+}
+
+/**
+ * ADR-0007 / ticket 16：用极小真实请求验证目标档案的接口、模型与 Key。
+ * 接受一份档案（可能是未保存的编辑值），组件不直接 fetch 大模型端点。
+ */
+export async function testApiConnection(settings: AISettings): Promise<ConnectionTestResult> {
+  const startedAt = Date.now();
+  const elapsed = () => Date.now() - startedAt;
+
+  if (!settings.endpoint?.trim() || !settings.model?.trim()) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      category: 'config',
+      message: '请先填写接口地址与模型名称',
+    };
+  }
+
+  const endpointUrl = normalizeEndpoint(settings.endpoint);
+  const isLocal = endpointUrl.includes('127.0.0.1') || endpointUrl.includes('localhost') || endpointUrl.includes(':11434');
+  if (!isLocal && !settings.apiKey?.trim()) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      category: 'config',
+      message: '当前接口需要 API Key，请先填写后再测试',
+    };
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (settings.apiKey?.trim()) {
+    headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(endpointUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: settings.model.trim(),
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+        temperature: 0,
+      }),
+    });
+  } catch (error: any) {
+    return {
+      ok: false,
+      latencyMs: elapsed(),
+      category: 'network',
+      message: `网络连接失败（无法连通 ${endpointUrl}）：${error?.message || error}`,
+    };
+  }
+
+  const latencyMs = elapsed();
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    const category: ConnectionTestCategory = response.status === 401 || response.status === 403 ? 'auth' : 'response';
+    return {
+      ok: false,
+      latencyMs,
+      category,
+      message: `AI 请求失败 [${response.status}]: ${mapHttpError(response.status, errorText)}`,
+    };
+  }
+
+  let json: any;
+  try {
+    json = await response.json();
+  } catch {
+    return {
+      ok: false,
+      latencyMs,
+      category: 'response',
+      message: '接口返回了非 JSON 响应，无法确认模型是否可用',
+    };
+  }
+
+  return {
+    ok: true,
+    latencyMs,
+    model: typeof json?.model === 'string' ? json.model : settings.model.trim(),
+    message: '连接成功',
+  };
 }
 
 async function callChatCompletions(

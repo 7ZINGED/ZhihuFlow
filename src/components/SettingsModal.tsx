@@ -17,12 +17,23 @@ import {
   AlertCircle 
 } from 'lucide-react';
 import { type AISettings } from '../db';
-import { 
-  getAISettings, 
-  saveAISettings, 
-  DEFAULT_TRIAGE_PROMPT, 
-  DEFAULT_CATEGORIZE_PROMPT 
+import {
+  DEFAULT_TRIAGE_PROMPT,
+  DEFAULT_CATEGORIZE_PROMPT,
+  testApiConnection,
+  type ConnectionTestResult,
 } from '../services/ai';
+import {
+  DEFAULT_AI_SETTINGS,
+  addProfile,
+  deleteProfile,
+  getActiveSettings,
+  loadProfileStore,
+  renameProfile,
+  saveProfileStore,
+  setActiveProfile,
+  type ApiProfileStore,
+} from '../services/apiProfiles';
 import { exportAllDataToJson, importDataFromJsonFile } from '../services/backup';
 
 interface SettingsModalProps {
@@ -31,58 +42,79 @@ interface SettingsModalProps {
   onDataImported?: () => void;
 }
 
+/** 老备份可能缺字段，编辑前统一补齐，避免档案之间字段漂移。 */
+function normalizeSettings(settings: AISettings): AISettings {
+  return {
+    ...DEFAULT_AI_SETTINGS,
+    ...settings,
+    customTriagePrompt: settings.customTriagePrompt || DEFAULT_TRIAGE_PROMPT,
+    customCategorizePrompt: settings.customCategorizePrompt || DEFAULT_CATEGORIZE_PROMPT,
+    maxTagCount: settings.maxTagCount || 2,
+    allowModifyTags: settings.allowModifyTags ?? true,
+    allowModifyDescription: settings.allowModifyDescription ?? true,
+    batchLimitQuick: settings.batchLimitQuick ?? 30,
+    batchLimitCategorize: settings.batchLimitCategorize ?? 20,
+    batchLimitDeep: settings.batchLimitDeep ?? 10,
+    maxGlobalTags: settings.maxGlobalTags ?? 8,
+    adaptiveGlobalTags: settings.adaptiveGlobalTags ?? true,
+  };
+}
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onDataImported }) => {
   const [activeTab, setActiveTab] = useState<'api' | 'prompts' | 'backup'>('api');
-  const [settings, setSettings] = useState<AISettings>({
-    endpoint: 'https://api.deepseek.com/v1',
-    model: 'deepseek-chat',
-    apiKey: '',
-    customTriagePrompt: DEFAULT_TRIAGE_PROMPT,
-    customCategorizePrompt: DEFAULT_CATEGORIZE_PROMPT,
-    maxTagCount: 2,
-    allowModifyTags: true,
-    allowModifyDescription: true,
-    batchLimitQuick: 30,
-    batchLimitCategorize: 20,
-    batchLimitDeep: 10,
-    maxGlobalTags: 8,
-    adaptiveGlobalTags: true,
+  const [settings, setSettings] = useState<AISettings>(DEFAULT_AI_SETTINGS);
+  const [profileStore, setProfileStore] = useState<ApiProfileStore>({
+    profiles: [],
+    activeProfileId: '',
   });
+  const [profileName, setProfileName] = useState('');
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
   const [backupMsg, setBackupMsg] = useState('');
   const [backupLoading, setBackupLoading] = useState(false);
+  const [testingConnection, setTestingConnection] = useState(false);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen) {
-      getAISettings().then((s) => {
-        setSettings({
-          ...s,
-          customTriagePrompt: s.customTriagePrompt || DEFAULT_TRIAGE_PROMPT,
-          customCategorizePrompt: s.customCategorizePrompt || DEFAULT_CATEGORIZE_PROMPT,
-          maxTagCount: s.maxTagCount || 2,
-          allowModifyTags: s.allowModifyTags ?? true,
-          allowModifyDescription: s.allowModifyDescription ?? true,
-          batchLimitQuick: s.batchLimitQuick ?? 30,
-          batchLimitCategorize: s.batchLimitCategorize ?? 20,
-          batchLimitDeep: s.batchLimitDeep ?? 10,
-          maxGlobalTags: s.maxGlobalTags ?? 8,
-          adaptiveGlobalTags: s.adaptiveGlobalTags ?? true,
-        });
-      });
+      void (async () => {
+        const store = await loadProfileStore();
+        const active = store.profiles.find((p) => p.id === store.activeProfileId);
+        setProfileStore(store);
+        setProfileName(active?.name ?? '默认配置');
+        setSettings(normalizeSettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
+      })();
       setMsg('');
       setBackupMsg('');
+      setTestResult(null);
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
 
+  /** 先把当前编辑内容写回激活档案，避免切换/新增/删除时丢失未保存编辑。 */
+  const persistDraftToActive = async (): Promise<ApiProfileStore> => {
+    const next = renameProfile(profileStore, profileStore.activeProfileId, profileName.trim() || '未命名配置');
+    const active = next.profiles.find((p) => p.id === next.activeProfileId);
+    if (!active) return profileStore;
+    active.settings = normalizeSettings(settings);
+    await saveProfileStore(next);
+    setProfileStore(next);
+    return next;
+  };
+
+  const loadActiveIntoEditor = (store: ApiProfileStore) => {
+    const active = store.profiles.find((p) => p.id === store.activeProfileId);
+    setProfileName(active?.name ?? '默认配置');
+    setSettings(normalizeSettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
-      await saveAISettings(settings);
+      await persistDraftToActive();
       setMsg('设置已成功保存！');
       setTimeout(() => {
         setMsg('');
@@ -90,6 +122,95 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
       }, 700);
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSwitchProfile = async (id: string) => {
+    if (id === profileStore.activeProfileId) return;
+    try {
+      const saved = await persistDraftToActive();
+      const next = setActiveProfile(saved, id);
+      await saveProfileStore(next);
+      setProfileStore(next);
+      loadActiveIntoEditor(next);
+      setMsg(`已切换到档案「${next.profiles.find((p) => p.id === id)?.name ?? ''}」`);
+      setTimeout(() => setMsg(''), 2200);
+    } catch (e: any) {
+      setMsg(`切换失败: ${e.message}`);
+    }
+  };
+
+  const handleAddProfile = async () => {
+    const name = window.prompt('新 API 配置档案名称', '新配置');
+    if (!name?.trim()) return;
+    try {
+      const saved = await persistDraftToActive();
+      const next = addProfile(saved, name.trim(), normalizeSettings(settings));
+      await saveProfileStore(next);
+      setProfileStore(next);
+      loadActiveIntoEditor(next);
+      setMsg(`已新增并切换到档案「${name.trim()}」`);
+      setTimeout(() => setMsg(''), 2200);
+    } catch (e: any) {
+      setMsg(`新增失败: ${e.message}`);
+    }
+  };
+
+  const handleRenameProfile = async () => {
+    if (!profileName.trim()) {
+      setMsg('档案名称不能为空');
+      return;
+    }
+    try {
+      await persistDraftToActive();
+      setMsg('档案名称已更新');
+      setTimeout(() => setMsg(''), 2200);
+    } catch (e: any) {
+      setMsg(`重命名失败: ${e.message}`);
+    }
+  };
+
+  const handleDeleteProfile = async () => {
+    if (profileStore.profiles.length <= 1) {
+      setMsg('至少需要保留一份 API 配置档案');
+      setTimeout(() => setMsg(''), 2202);
+      return;
+    }
+    if (!window.confirm(`确定删除当前档案「${profileName}」吗？此操作不可撤销。`)) return;
+    try {
+      const saved = await persistDraftToActive();
+      const next = deleteProfile(saved, saved.activeProfileId);
+      if (next.profiles.length === saved.profiles.length) {
+        setMsg('无法删除最后一份档案');
+        return;
+      }
+      await saveProfileStore(next);
+      setProfileStore(next);
+      loadActiveIntoEditor(next);
+      setMsg('档案已删除，已切换到剩余档案');
+      setTimeout(() => setMsg(''), 2202);
+    } catch (e: any) {
+      setMsg(`删除失败: ${e.message}`);
+    }
+  };
+
+  const handleTestConnection = async () => {
+    if (testingConnection) return;
+    setTestingConnection(true);
+    setTestResult(null);
+    try {
+      // 用正在编辑的档案值（含未保存的 Key），不读已保存的旧值
+      const result = await testApiConnection(settings);
+      setTestResult(result);
+    } catch (e: any) {
+      setTestResult({
+        ok: false,
+        latencyMs: 0,
+        category: 'response',
+        message: `测试失败: ${e.message}`,
+      });
+    } finally {
+      setTestingConnection(false);
     }
   };
 
@@ -115,7 +236,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     setBackupLoading(true);
     try {
       const res = await exportAllDataToJson();
-      setBackupMsg(`备份成功！已导出 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+      setBackupMsg(`备份成功！已导出 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容；API Key 未写入备份。`);
     } catch (e: any) {
       setBackupMsg(`导出失败: ${e.message}`);
     } finally {
@@ -130,7 +251,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     setBackupLoading(true);
     try {
       const res = await importDataFromJsonFile(file);
-      setBackupMsg(`🎉 导入成功！已还原 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。`);
+      const keyHint = res.keyRequiresRefill ? ' API Key 已按安全策略置空，请重新填写后再测试连通性。' : '';
+      setBackupMsg(`🎉 导入成功！已还原 ${res.collectionsCount} 个收藏夹与 ${res.articlesCount} 篇内容。${keyHint}`);
       onDataImported?.();
     } catch (err: any) {
       setBackupMsg(`导入失败: ${err.message}`);
@@ -229,6 +351,64 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
           {/* TAB 1: 接口配置 */}
           {activeTab === 'api' && (
             <div className="space-y-4 animate-fade-in">
+              {/* API 配置档案：档案是完整设置集合，预设只改接口与模型 */}
+              <div className="p-3 rounded-2xl border border-blue-200/80 dark:border-blue-900/60 bg-blue-50/40 dark:bg-blue-950/20 space-y-2.5">
+                <div className="flex items-center gap-1.5 font-bold text-slate-800 dark:text-slate-100 text-xs">
+                  <Database className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                  <span>API 配置档案</span>
+                  <span className="ml-auto text-[10px] font-medium text-blue-600 dark:text-blue-400">
+                    正在编辑：{profileName || '默认配置'}
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  <select
+                    value={profileStore.activeProfileId}
+                    onChange={(e) => void handleSwitchProfile(e.target.value)}
+                    className="flex-1 min-w-[140px] px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                  >
+                    {profileStore.profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => void handleAddProfile()}
+                    className="px-2.5 py-1.5 rounded-xl bg-blue-600 text-white text-xs font-medium hover:bg-blue-700 transition"
+                  >
+                    新增档案
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRenameProfile()}
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 text-xs hover:bg-white dark:hover:bg-slate-800 transition"
+                  >
+                    重命名
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteProfile()}
+                    disabled={profileStore.profiles.length <= 1}
+                    className="px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-rose-600 dark:text-rose-400 text-xs hover:bg-rose-50 dark:hover:bg-rose-950/30 disabled:opacity-40 transition"
+                  >
+                    删除
+                  </button>
+                </div>
+
+                <input
+                  type="text"
+                  value={profileName}
+                  onChange={(e) => setProfileName(e.target.value)}
+                  placeholder="档案名称，例如：工作 DeepSeek"
+                  className="w-full px-2.5 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-800 dark:text-slate-100 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500/20"
+                />
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                  档案包含接口、模型、Key、提示词与批次上限。切换只影响新入队任务，运行中的队列仍用入队时快照。
+                </p>
+              </div>
+
               {/* 快速预设药丸 */}
               <div className="space-y-1.5">
                 <label className="text-xs font-semibold text-slate-500 dark:text-slate-400">一键填入常用提供商：</label>
@@ -305,6 +485,45 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
                     placeholder="sk-xxxxxxxx (本地无鉴权可留空)"
                     className="w-full px-3 py-2 rounded-xl border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 bg-white dark:bg-slate-800 dark:text-slate-100"
                   />
+                </div>
+
+                {/* 连通性测试：使用正在编辑的档案值，含未保存的 Key */}
+                <div className="p-3 rounded-2xl border border-emerald-200/80 dark:border-emerald-900/60 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 font-semibold text-slate-700 dark:text-slate-200">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                      <span>连通性测试</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void handleTestConnection()}
+                      disabled={testingConnection}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold disabled:opacity-50 transition"
+                    >
+                      {testingConnection ? '测试中...' : '测试当前档案'}
+                    </button>
+                  </div>
+
+                  {testResult && (
+                    <div
+                      className={`flex items-start gap-1.5 text-[11px] leading-relaxed ${
+                        testResult.ok
+                          ? 'text-emerald-700 dark:text-emerald-300'
+                          : 'text-rose-600 dark:text-rose-400'
+                      }`}
+                    >
+                      {testResult.ok ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                      ) : (
+                        <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                      )}
+                      <span>
+                        {testResult.ok
+                          ? `连接成功：模型 ${testResult.model ?? settings.model}，耗时 ${testResult.latencyMs}ms`
+                          : `${testResult.message}（耗时 ${testResult.latencyMs}ms）`}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

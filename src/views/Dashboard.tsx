@@ -56,6 +56,7 @@ import {
   clearQueueStorage 
 } from '../services/aiQueue';
 import { isModeCompleted, reconcileQueueWithProgress } from '../services/queueReconcile';
+import { loadProfileStore, pinSettings, snapshotForTask } from '../services/apiProfiles';
 import { acquireQueueLock, releaseQueueLock } from '../services/queueLock';
 import { createQueueEngine, type QueueEngine } from '../services/queueEngine';
 import { findVanishedMemberIds } from '../services/membershipCleanup';
@@ -313,7 +314,8 @@ export const Dashboard: React.FC = () => {
 
     const engine = createQueueEngine(
       {
-        loadSettings: () => getAISettings(),
+        // 老队列没有快照时回退到当前激活档案
+        loadSettings: async () => tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot ?? getAISettings(),
         collections,
         analyzeSingle: (article, m) => handleAnalyzeSingle(article, m),
         loadArticle: (id) => db.articles.get(id),
@@ -352,9 +354,15 @@ export const Dashboard: React.FC = () => {
 
     engineRef.current = engine;
 
+    // ADR-0007：整个队列运行期钉住入队快照，避免切换档案改变在途任务的接口/模型/Key
+    const queuedSettings =
+      tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot ?? await getAISettings();
+    const releasePinnedSettings = pinSettings(queuedSettings);
+
     try {
       await engine.run(tasksList, mode);
     } finally {
+      releasePinnedSettings();
       engineRef.current = null;
       // 循环因暂停 / 完成而退出：释放所有权，允许用户在本页或其他页重新接管
       releaseQueueLock();
@@ -455,6 +463,9 @@ export const Dashboard: React.FC = () => {
       }
     }
 
+    // ADR-0007：入队时快照激活档案，运行中切换档案不影响在途任务
+    const taskSettings = snapshotForTask(await loadProfileStore());
+
     // 构建新任务列表
     const newTasks: AIQueueTask[] = targetsToProcess.map((item) => ({
       articleId: item.id,
@@ -462,6 +473,7 @@ export const Dashboard: React.FC = () => {
       mode,
       status: 'pending',
       updatedAt: Date.now(),
+      settingsSnapshot: { ...taskSettings },
     }));
 
     // 若当前已有未完成任务，智能合并并去重

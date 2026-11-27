@@ -1,3 +1,5 @@
+import type { AISettings } from '../db';
+
 export interface AIQueueTask {
   articleId: string;
   title: string;
@@ -5,6 +7,8 @@ export interface AIQueueTask {
   status: 'pending' | 'processing' | 'done' | 'failed';
   error?: string;
   updatedAt: number;
+  /** 入队时快照的 API 配置；老队列没有此字段，回退到当前激活档案（ADR-0007） */
+  settingsSnapshot?: AISettings;
 }
 
 export interface AIQueueState {

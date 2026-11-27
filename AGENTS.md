@@ -11,7 +11,7 @@ ZhihuFlow（知流）是一个 WXT + React 19 的 Chrome MV3 扩展：把知乎�
 | `npm run compile` | `tsc --noEmit` 类型检查 |
 | `npm run test` | Vitest 单次运行 |
 | `npm run test:watch` | Vitest 监听模式 |
-| `npm run check` | 类型检查 + 测试，提交前必须通过 |
+| `npm run check` | 类型检查 + 测试 + Key 扫描自检 + staged diff 扫描，提交前必须通过 |
 
 ## Layout
 

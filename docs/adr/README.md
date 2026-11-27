@@ -10,6 +10,7 @@
 | [0004](./0004-queue-state-source-of-truth.md) | 队列状态降权为运行检查点，进度只认文章字段 | 已接受 |
 | [0005](./0005-ai-output-belongs-to-content.md) | AI 产物属于内容：批次按 contentId 折叠，写回只补空不覆盖 | 已接受 |
 | [0006](./0006-vanished-membership-goes-to-trash.md) | 成员关系消失时移入回收站（不标失效、不物理删），且仅在抓取完整时做差集 | 已接受 |
+| [0007](./0007-api-profiles-and-key-isolation.md) | 多份 API 配置档案并存，Key 不进入可提交文件 | 已接受 |
 
 ## 写新 ADR 的时机
 
