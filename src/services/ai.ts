@@ -1,5 +1,5 @@
 import { type AISettings } from '../db';
-import { DEFAULT_AI_SETTINGS, getActiveSettings, getPinnedSettings, loadProfileStore, saveProfileStore } from './apiProfiles';
+import { DEFAULT_AI_SETTINGS, getActiveSettings, getPinnedSettings, loadProfileStore } from './apiProfiles';
 import { mapHttpError, normalizeTags, parseAiJson, stripCodeFence } from './aiParse';
 import {
   DEFAULT_CATEGORIZE_PROMPT,
@@ -23,9 +23,6 @@ import {
 export { DEFAULT_TRIAGE_PROMPT, DEFAULT_CATEGORIZE_PROMPT } from './aiPrompts';
 export type { CategorizeOptions } from './aiPrompts';
 
-// 配置档案是 AI 设置的唯一来源；保留同名导出供既有调用点使用
-export { DEFAULT_AI_SETTINGS } from './apiProfiles';
-
 export async function getAISettings(): Promise<AISettings> {
   // 队列运行期间由 pinSettings 钉住入队快照；此时忽略档案切换（ADR-0007）
   const pinned = getPinnedSettings();
@@ -34,20 +31,60 @@ export async function getAISettings(): Promise<AISettings> {
   return getActiveSettings(store) ?? DEFAULT_AI_SETTINGS;
 }
 
-export async function saveAISettings(settings: AISettings): Promise<void> {
-  const store = await loadProfileStore();
-  const active = store.profiles.find((p) => p.id === store.activeProfileId);
-  if (!active) return;
-  active.settings = { ...settings };
-  await saveProfileStore(store);
-}
-
 export function normalizeEndpoint(url: string): string {
   const clean = url.trim().replace(/\/+$/, '');
   if (clean.endsWith('/chat/completions')) {
     return clean;
   }
   return `${clean}/chat/completions`;
+}
+
+type ChatTarget =
+  | { ok: true; endpointUrl: string; headers: Record<string, string> }
+  | { ok: false; reason: 'config' | 'auth'; message: string };
+
+/** 正式调用与连通性测试共用同一套端点规范化、Key 校验和鉴权头构造。 */
+function resolveChatTarget(settings: AISettings): ChatTarget {
+  if (!settings.endpoint?.trim() || !settings.model?.trim()) {
+    return {
+      ok: false,
+      reason: 'config',
+      message: '未配置 AI 接口或模型名称，请前往右上角「设置」面板配置！',
+    };
+  }
+
+  const endpointUrl = normalizeEndpoint(settings.endpoint);
+  const isLocal = endpointUrl.includes('127.0.0.1') || endpointUrl.includes('localhost') || endpointUrl.includes(':11434');
+  if (!isLocal && !settings.apiKey?.trim()) {
+    return {
+      ok: false,
+      reason: 'auth',
+      message: '当前大模型接口需要 API Key，请先前往右上角「设置」面板填写 API Key！',
+    };
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (settings.apiKey?.trim()) {
+    headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
+  }
+  return { ok: true, endpointUrl, headers };
+}
+
+async function postChatCompletions(
+  target: Extract<ChatTarget, { ok: true }>,
+  body: Record<string, unknown>
+): Promise<Response> {
+  try {
+    return await fetch(target.endpointUrl, {
+      method: 'POST',
+      headers: target.headers,
+      body: JSON.stringify(body),
+    });
+  } catch (netErr: any) {
+    throw new Error(`网络连接失败（无法连通 ${target.endpointUrl}，请检查网络或代理）: ${netErr?.message || netErr}`);
+  }
 }
 
 export type ConnectionTestCategory = 'config' | 'auth' | 'network' | 'response';
@@ -68,51 +105,30 @@ export async function testApiConnection(settings: AISettings): Promise<Connectio
   const startedAt = Date.now();
   const elapsed = () => Date.now() - startedAt;
 
-  if (!settings.endpoint?.trim() || !settings.model?.trim()) {
+  const target = resolveChatTarget(settings);
+  if (!target.ok) {
     return {
       ok: false,
       latencyMs: 0,
       category: 'config',
-      message: '请先填写接口地址与模型名称',
+      message: target.message,
     };
-  }
-
-  const endpointUrl = normalizeEndpoint(settings.endpoint);
-  const isLocal = endpointUrl.includes('127.0.0.1') || endpointUrl.includes('localhost') || endpointUrl.includes(':11434');
-  if (!isLocal && !settings.apiKey?.trim()) {
-    return {
-      ok: false,
-      latencyMs: 0,
-      category: 'config',
-      message: '当前接口需要 API Key，请先填写后再测试',
-    };
-  }
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (settings.apiKey?.trim()) {
-    headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
   }
 
   let response: Response;
   try {
-    response = await fetch(endpointUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: settings.model.trim(),
-        messages: [{ role: 'user', content: 'ping' }],
-        max_tokens: 1,
-        temperature: 0,
-      }),
+    response = await postChatCompletions(target, {
+      model: settings.model.trim(),
+      messages: [{ role: 'user', content: 'ping' }],
+      max_tokens: 1,
+      temperature: 0,
     });
   } catch (error: any) {
     return {
       ok: false,
       latencyMs: elapsed(),
       category: 'network',
-      message: `网络连接失败（无法连通 ${endpointUrl}）：${error?.message || error}`,
+      message: error?.message || String(error),
     };
   }
 
@@ -154,39 +170,16 @@ async function callChatCompletions(
   temperature = 0.3
 ): Promise<string> {
   const settings = await getAISettings();
-  if (!settings.endpoint || !settings.model) {
-    throw new Error('未配置 AI 接口或模型名称，请前往右上角「设置」面板配置！');
+  const target = resolveChatTarget(settings);
+  if (!target.ok) {
+    throw new Error(target.message);
   }
 
-  const endpointUrl = normalizeEndpoint(settings.endpoint);
-
-  // 若为商业远程模型服务且未填写 API Key，直接友好拦截提醒，避免盲目发送401
-  const isLocal = endpointUrl.includes('127.0.0.1') || endpointUrl.includes('localhost') || endpointUrl.includes(':11434');
-  if (!isLocal && !settings.apiKey?.trim()) {
-    throw new Error('当前大模型接口需要 API Key，请先前往右上角「设置」面板填写 API Key！');
-  }
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
-  if (settings.apiKey) {
-    headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
-  }
-
-  let response: Response;
-  try {
-    response = await fetch(endpointUrl, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model: settings.model.trim(),
-        messages,
-        temperature,
-      }),
-    });
-  } catch (netErr: any) {
-    throw new Error(`网络连接失败（无法连通 ${endpointUrl}，请检查网络或代理）: ${netErr?.message || netErr}`);
-  }
+  const response = await postChatCompletions(target, {
+    model: settings.model.trim(),
+    messages,
+    temperature,
+  });
 
   if (!response.ok) {
     const errorText = await response.text();

@@ -314,8 +314,11 @@ export const Dashboard: React.FC = () => {
 
     const engine = createQueueEngine(
       {
-        // 老队列没有快照时回退到当前激活档案
-        loadSettings: async () => tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot ?? getAISettings(),
+        // 本次运行钉在首个待处理任务的快照上；老队列没有快照时回退到当前激活档案
+        loadSettings: async () =>
+          tasksList.find((t) => (t.status === 'pending' || t.status === 'processing') && t.settingsSnapshot)?.settingsSnapshot
+          ?? tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot
+          ?? getAISettings(),
         collections,
         analyzeSingle: (article, m) => handleAnalyzeSingle(article, m),
         loadArticle: (id) => db.articles.get(id),
@@ -356,7 +359,9 @@ export const Dashboard: React.FC = () => {
 
     // ADR-0007：整个队列运行期钉住入队快照，避免切换档案改变在途任务的接口/模型/Key
     const queuedSettings =
-      tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot ?? await getAISettings();
+      tasksList.find((t) => (t.status === 'pending' || t.status === 'processing') && t.settingsSnapshot)?.settingsSnapshot
+      ?? tasksList.find((t) => t.settingsSnapshot)?.settingsSnapshot
+      ?? await getAISettings();
     const releasePinnedSettings = pinSettings(queuedSettings);
 
     try {

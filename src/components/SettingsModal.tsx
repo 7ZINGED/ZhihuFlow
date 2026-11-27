@@ -29,6 +29,7 @@ import {
   deleteProfile,
   getActiveSettings,
   loadProfileStore,
+  normalizeAISettings,
   renameProfile,
   saveProfileStore,
   setActiveProfile,
@@ -40,24 +41,6 @@ interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   onDataImported?: () => void;
-}
-
-/** 老备份可能缺字段，编辑前统一补齐，避免档案之间字段漂移。 */
-function normalizeSettings(settings: AISettings): AISettings {
-  return {
-    ...DEFAULT_AI_SETTINGS,
-    ...settings,
-    customTriagePrompt: settings.customTriagePrompt || DEFAULT_TRIAGE_PROMPT,
-    customCategorizePrompt: settings.customCategorizePrompt || DEFAULT_CATEGORIZE_PROMPT,
-    maxTagCount: settings.maxTagCount || 2,
-    allowModifyTags: settings.allowModifyTags ?? true,
-    allowModifyDescription: settings.allowModifyDescription ?? true,
-    batchLimitQuick: settings.batchLimitQuick ?? 30,
-    batchLimitCategorize: settings.batchLimitCategorize ?? 20,
-    batchLimitDeep: settings.batchLimitDeep ?? 10,
-    maxGlobalTags: settings.maxGlobalTags ?? 8,
-    adaptiveGlobalTags: settings.adaptiveGlobalTags ?? true,
-  };
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, onDataImported }) => {
@@ -84,7 +67,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
         const active = store.profiles.find((p) => p.id === store.activeProfileId);
         setProfileStore(store);
         setProfileName(active?.name ?? '默认配置');
-        setSettings(normalizeSettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
+        setSettings(normalizeAISettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
       })();
       setMsg('');
       setBackupMsg('');
@@ -99,7 +82,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     const next = renameProfile(profileStore, profileStore.activeProfileId, profileName.trim() || '未命名配置');
     const active = next.profiles.find((p) => p.id === next.activeProfileId);
     if (!active) return profileStore;
-    active.settings = normalizeSettings(settings);
+    active.settings = normalizeAISettings(settings);
     await saveProfileStore(next);
     setProfileStore(next);
     return next;
@@ -108,7 +91,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
   const loadActiveIntoEditor = (store: ApiProfileStore) => {
     const active = store.profiles.find((p) => p.id === store.activeProfileId);
     setProfileName(active?.name ?? '默认配置');
-    setSettings(normalizeSettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
+    setSettings(normalizeAISettings(getActiveSettings(store) ?? DEFAULT_AI_SETTINGS));
   };
 
   const handleSave = async () => {
@@ -145,7 +128,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, o
     if (!name?.trim()) return;
     try {
       const saved = await persistDraftToActive();
-      const next = addProfile(saved, name.trim(), normalizeSettings(settings));
+      const next = addProfile(saved, name.trim(), normalizeAISettings(settings));
       await saveProfileStore(next);
       setProfileStore(next);
       loadActiveIntoEditor(next);

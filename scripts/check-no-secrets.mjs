@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
 
 /**
  * ADR-0007 / ticket 15：提交前扫描新增行，阻断疑似真实 API Key。
@@ -74,6 +75,31 @@ function readStagedDiff() {
   }
 }
 
+function readTrackedText() {
+  try {
+    const files = execFileSync('git', ['ls-files', '-z'], {
+      encoding: 'utf8',
+      maxBuffer: 20 * 1024 * 1024,
+    }).split('\0').filter(Boolean);
+    const binary = /\.(png|jpe?g|gif|webp|ico|pdf|zip|mp4|woff2?|ttf)$/i;
+
+    return files
+      .filter((file) => !binary.test(file))
+      .map((file) => {
+        try {
+          if (statSync(file).size > 1024 * 1024) return '';
+          return readFileSync(file, 'utf8');
+        } catch {
+          return '';
+        }
+      })
+      .join('\n');
+  } catch (error) {
+    console.error(`❌ 无法读取工作区文件：${error.message}`);
+    process.exit(2);
+  }
+}
+
 function selfTest() {
   const fake = `apiKey: 'sk-test-${'a'.repeat(32)}'`;
   const real = `apiKey: 'sk-${'a'.repeat(32)}'`;
@@ -96,9 +122,14 @@ function main(argv) {
   }
 
   const textIndex = argv.indexOf('--check-text');
-  const text = textIndex >= 0
-    ? (argv[textIndex + 1] ?? '')
-    : addedLinesFromDiff(readStagedDiff());
+  let text;
+  if (textIndex >= 0) {
+    text = argv[textIndex + 1] ?? '';
+  } else if (argv.includes('--check-worktree')) {
+    text = readTrackedText();
+  } else {
+    text = addedLinesFromDiff(readStagedDiff());
+  }
   const hits = findSuspectedSecrets(text);
 
   if (hits.length > 0) {

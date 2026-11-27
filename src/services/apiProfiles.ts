@@ -18,6 +18,24 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   adaptiveGlobalTags: true,
 };
 
+/** 老备份可能缺字段；统一补齐，避免迁移、导入与编辑三处规则漂移。 */
+export function normalizeAISettings(settings?: Partial<AISettings>): AISettings {
+  return {
+    ...DEFAULT_AI_SETTINGS,
+    ...(settings ?? {}),
+    customTriagePrompt: settings?.customTriagePrompt || DEFAULT_TRIAGE_PROMPT,
+    customCategorizePrompt: settings?.customCategorizePrompt || DEFAULT_CATEGORIZE_PROMPT,
+    maxTagCount: settings?.maxTagCount || 2,
+    allowModifyTags: settings?.allowModifyTags ?? true,
+    allowModifyDescription: settings?.allowModifyDescription ?? true,
+    batchLimitQuick: settings?.batchLimitQuick ?? 30,
+    batchLimitCategorize: settings?.batchLimitCategorize ?? 20,
+    batchLimitDeep: settings?.batchLimitDeep ?? 10,
+    maxGlobalTags: settings?.maxGlobalTags ?? 8,
+    adaptiveGlobalTags: settings?.adaptiveGlobalTags ?? true,
+  };
+}
+
 export interface ApiProfile {
   id: string;
   name: string;
@@ -61,10 +79,9 @@ export async function loadProfileStore(storage: ProfileStorage = createProfileSt
   }
 
   const legacy = raw[LEGACY_SETTINGS_STORAGE_KEY];
-  const settings: AISettings = {
-    ...DEFAULT_AI_SETTINGS,
-    ...(legacy && typeof legacy === 'object' ? legacy as Partial<AISettings> : {}),
-  };
+  const settings = normalizeAISettings(
+    legacy && typeof legacy === 'object' ? legacy as Partial<AISettings> : undefined
+  );
   const store: ApiProfileStore = {
     profiles: [{ id: 'default', name: '默认配置', settings }],
     activeProfileId: 'default',
@@ -165,8 +182,7 @@ export async function restoreProfilesFromBackup(
     id: p.id || `profile-${index}`,
     name: p.name || '默认配置',
     settings: {
-      ...DEFAULT_AI_SETTINGS,
-      ...p.settings,
+      ...normalizeAISettings(p.settings),
       apiKey: '',
     },
   }));

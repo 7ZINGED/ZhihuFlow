@@ -18,3 +18,8 @@
 - [x] 配置档案模块有公共缝测试：CRUD、激活切换、迁移、导出脱敏、导入置空、入队快照不随切换变化
 - [x] 提交前 Key 扫描脚本存在且接入检查：假 Key 通过，疑似真实 Key 阻断
 - [x] `npm run check` 通过
+
+## Comments
+
+- 已在临时 git 仓库用真实 staged diff 验证 Key 扫描：`sk-test-` 假 Key 放行，构造的疑似真实 Key 触发非零退出并阻断提交；验证字符串未写入仓库。
+- pre-commit hook 由 `scripts/install-git-hooks.mjs` 安装，`npm run check` 同时执行自检、staged diff 扫描与工作区全量扫描；CI 显式执行 `npm run check:secrets:all`。
